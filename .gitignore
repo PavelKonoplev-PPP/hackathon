@@ -1,0 +1,25 @@
+# Данные кейса (1,4 ГБ) — не коммитим, скачиваются scripts/fetch_data.sh
+Исходники/
+data/
+*.csv
+
+# Секреты и окружение
+.env
+.env.*
+!.env.example
+
+# Мусор ОС и редакторов
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
