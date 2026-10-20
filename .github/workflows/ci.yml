@@ -17,3 +17,17 @@ jobs:
           if [ -n "$big$csv" ]; then
             echo "Нельзя коммитить большие файлы и CSV:"; echo "$big"; echo "$csv"; exit 1
           fi
+
+  postgresql-loader-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Установить зависимости загрузчика
+        run: python -m pip install -r db/requirements.txt
+      - name: Проверить синтаксис и имена таблиц
+        run: |
+          python -m compileall -q db
+          python -m unittest discover -s db -p 'test_*.py'
