@@ -22,6 +22,8 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 DEFAULT_SAMPLE_SIZE = 200
 MAX_SAMPLE_SIZE = 1000
+TARGET_CANDIDATE_MULTIPLIER = 15
+MIN_SAMPLE_PERCENT = 0.05
 MAX_TABLES = 100
 EXAMPLE_LIMIT = 3
 VALUE_LIMIT = 80
@@ -119,6 +121,10 @@ def analyze_column(
         "warning": None,
     }
     if not nonempty:
+        # Без наблюдений название колонки — лишь подсказка, не доказательство.
+        if identifier_name(name):
+            result["type_hint"] = "identifier"
+        result["warning"] = "В выборке нет непустых значений; тип не подтверждён"
         return result
 
     native_type = NATIVE_TYPES.get(storage_type.lower())
@@ -230,6 +236,39 @@ def get_columns(conn, schema: str, table: str) -> list[tuple]:
     ).fetchall()
 
 
+def choose_sampling_percent(estimated_rows: int | None, sample_size: int) -> float:
+    """Подбираем долю блоков для анализа без сканирования всей большой таблицы."""
+    if estimated_rows is None or estimated_rows <= 0:
+        return 5.0
+    percent = 100.0 * sample_size * TARGET_CANDIDATE_MULTIPLIER / estimated_rows
+    return round(min(100.0, max(MIN_SAMPLE_PERCENT, percent)), 4)
+
+
+def sample_table(conn, schema: str, table: str, estimated: int | None,
+                 sample_size: int) -> tuple[list[tuple], str, float | None]:
+    """Случайные физические блоки + перемешивание внутри выбранного набора."""
+    qualified = sql.Identifier(schema, table)
+    if estimated is not None and 0 <= estimated <= sample_size:
+        rows = conn.execute(
+            sql.SQL("SELECT * FROM {} LIMIT %s").format(qualified),
+            (sample_size,),
+        ).fetchall()
+        return rows, "all_rows_for_small_table", None
+
+    statement = sql.SQL(
+        "SELECT * FROM {} TABLESAMPLE SYSTEM (%s) ORDER BY random() LIMIT %s"
+    ).format(qualified)
+    percent = choose_sampling_percent(estimated, sample_size)
+    rows = []
+    for _ in range(5):
+        rows = conn.execute(statement, (percent, sample_size)).fetchall()
+        if len(rows) >= sample_size or percent >= 100.0:
+            break
+        # Если физических блоков выбрано слишком мало, расширяем выборку.
+        percent = min(100.0, max(percent * 4, percent + 0.1))
+    return rows, "tablesample_system_random", percent
+
+
 def profile_database(
     conn,
     schema: str = "raw",
@@ -238,7 +277,7 @@ def profile_database(
     max_tables: int = MAX_TABLES,
     include_examples: bool = True,
 ) -> dict:
-    """Не выполняет записи; каждая таблица считывается с LIMIT."""
+    """Не выполняет записи; число возвращаемых строк ограничено."""
     if not 1 <= sample_size <= MAX_SAMPLE_SIZE:
         raise ValueError(f"sample_size должен быть от 1 до {MAX_SAMPLE_SIZE}")
     if not 1 <= max_tables <= MAX_TABLES:
@@ -260,7 +299,7 @@ def profile_database(
         "schema": schema,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "sampling": {
-            "method": "first_rows",
+            "method": "postgresql_tablesample_system_for_large_tables",
             "max_rows_per_table": sample_size,
             "statistics_are_sample_only": True,
         },
@@ -271,12 +310,9 @@ def profile_database(
         columns = get_columns(conn, schema, table_name)
         # Идентификаторы экранируются отдельно; имя таблицы не подставляется
         # в SQL через f-строку и не может превратиться в SQL-инъекцию.
-        rows = conn.execute(
-            sql.SQL("SELECT * FROM {} LIMIT %s").format(
-                sql.Identifier(schema, table_name)
-            ),
-            (sample_size,),
-        ).fetchall()
+        rows, method, sample_percent = sample_table(
+            conn, schema, table_name, estimated, sample_size
+        )
         column_profiles = []
         for index, (column_name, storage_type, nullable) in enumerate(columns):
             stats = analyze_column(
@@ -295,6 +331,8 @@ def profile_database(
             "name": table_name,
             "estimated_total_rows": estimated if estimated is not None and estimated >= 0 else None,
             "sampled_rows": len(rows),
+            "sample_method": method,
+            "tablesample_percent": sample_percent,
             "columns": column_profiles,
         })
     return report

@@ -5,7 +5,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import Mock
 
-from profile_db import analyze_column, profile_database
+from profile_db import analyze_column, choose_sampling_percent, profile_database
 
 
 class TypeInferenceTests(unittest.TestCase):
@@ -66,6 +66,7 @@ class TypeInferenceTests(unittest.TestCase):
         p = analyze_column("Поле", "text", [None, "", " "])
         self.assertEqual(p["inferred_type"], "unknown")
         self.assertEqual(p["sample_blank_count"], 2)
+        self.assertIn("нет непустых", p["warning"])
 
     def test_truncate_examples(self):
         p = analyze_column("Название", "text", ["a" * 500 + "\n"])
@@ -92,8 +93,48 @@ class DatabaseProfilingTests(unittest.TestCase):
         self.assertEqual(table["columns"][1]["inferred_type"], "decimal")
         self.assertTrue(result["sampling"]["statistics_are_sample_only"])
         sql_query = conn.execute.call_args_list[2].args[0]
-        self.assertEqual(sql_query.as_string(), 'SELECT * FROM "raw"."sales" LIMIT %s')
-        self.assertEqual(conn.execute.call_args_list[2].args[1], (2,))
+        self.assertEqual(sql_query.as_string(),
+                         'SELECT * FROM "raw"."sales" TABLESAMPLE SYSTEM (%s) ORDER BY random() LIMIT %s')
+        self.assertEqual(conn.execute.call_args_list[2].args[1], (3.0, 2))
+        self.assertEqual(table["sample_method"], "tablesample_system_random")
+
+    def test_sampling_percentage_is_bounded(self):
+        self.assertEqual(choose_sampling_percent(500000, 300), 0.9)
+        self.assertEqual(choose_sampling_percent(10, 300), 100.0)
+        self.assertEqual(choose_sampling_percent(None, 300), 5.0)
+
+    def test_identifier_hint_when_no_values(self):
+        p = analyze_column("Код предыдущего обращения", "text", [None, "", None])
+        self.assertEqual(p["inferred_type"], "unknown")
+        self.assertEqual(p["type_hint"], "identifier")
+        self.assertEqual(p["confidence"], 0.0)
+
+    def test_sample_retries_with_more_blocks(self):
+        conn = Mock()
+        conn.execute.side_effect = [
+            Mock(fetchall=Mock(return_value=[("requests", 500000)])),
+            Mock(fetchall=Mock(return_value=[("Код предыдущего обращения", "text", "YES")])),
+            Mock(fetchall=Mock(return_value=[])),
+            Mock(fetchall=Mock(return_value=[("ПД-ОБ-0000078",), ("ПД-ОБ-0000110",)])),
+        ]
+        result = profile_database(conn, schema="raw", sample_size=2)
+        column = result["tables"][0]["columns"][0]
+        self.assertEqual(column["inferred_type"], "identifier")
+        self.assertEqual(result["tables"][0]["sampled_rows"], 2)
+        self.assertEqual(conn.execute.call_args_list[2].args[1], (0.05, 2))
+        self.assertEqual(conn.execute.call_args_list[3].args[1], (0.2, 2))
+
+    def test_small_table(self):
+        conn = Mock()
+        conn.execute.side_effect = [
+            Mock(fetchall=Mock(return_value=[("tiny", 1)])),
+            Mock(fetchall=Mock(return_value=[("id", "integer", "NO")])),
+            Mock(fetchall=Mock(return_value=[(5,)])),
+        ]
+        result = profile_database(conn, schema="raw", sample_size=10)
+        self.assertEqual(result["tables"][0]["sample_method"], "all_rows_for_small_table")
+        self.assertEqual(conn.execute.call_args_list[2].args[0].as_string(),
+                         'SELECT * FROM "raw"."tiny" LIMIT %s')
 
     def test_reject_system_schema_and_oversized_sample(self):
         with self.assertRaises(ValueError):
