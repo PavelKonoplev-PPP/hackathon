@@ -1,17 +1,22 @@
-# Для разработки: локальная база ClickHouse.
-# На проверке базу подключаем по настройкам из .env (см. .env.example).
+# Локальный PostgreSQL для разработки. База не содержит данные по умолчанию.
+# На проверке подключение к предоставленной БД задаётся через .env.
 services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.8
-    ports:
-      - "8123:8123"
-      - "9000:9000"
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      CLICKHOUSE_DB: hackathon
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      POSTGRES_DB: ${POSTGRES_DB:-hackathon}
+      POSTGRES_USER: ${POSTGRES_USER:-bi_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 15
 
 volumes:
-  clickhouse_data:
+  postgres_data:

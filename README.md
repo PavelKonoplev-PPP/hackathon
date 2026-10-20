@@ -1,33 +1,51 @@
 # Хакатон: AI-Native BI-система
 
-Чат-платформа, где аналитик задаёт вопросы к данным обычными словами, а LLM-агент
-сам находит ответ в базе и показывает его текстом, графиком или дашбордом.
+Чат-платформа, где аналитик задаёт вопросы к данным обычными словами,
+а LLM-агент должен находить ответ в базе и показывать его текстом,
+графиком или дашбордом.
 
-Условия кейса и описание 9 датасетов — в `Исходники/README.md` (после загрузки данных).
+**СУБД проекта — PostgreSQL.** Архитектура:
+[docs/architecture.md](docs/architecture.md).
 
-## Как устроено
+## Структура проекта
 
-Вопрос пользователя → LLM строит SQL → ClickHouse возвращает цифры →
-LLM выбирает график и пишет пояснение → пользователь видит ответ.
-Подробнее: [docs/architecture.md](docs/architecture.md).
-
-## Структура репозитория
-
-| Папка | Что внутри |
+| Папка | Назначение |
 |---|---|
-| `backend/` | API и LLM-агент |
-| `frontend/` | Чат и дашборды |
-| `db/` | Схемы таблиц и загрузка CSV в базу |
-| `docs/` | Архитектура, словарь данных, статус сценариев |
-| `scripts/` | Вспомогательные скрипты (скачивание данных) |
+| `backend/` | API и LLM-агент (в разработке) |
+| `frontend/` | Чат и визуализация, пока с демо-ответами |
+| `db/` | Локальный PostgreSQL, загрузка CSV, проверка схемы |
+| `docs/` | Архитектура, данные, сценарии и формат API |
+| `scripts/` | Скачивание датасетов |
 
-## Быстрый старт
+## Быстрый старт: база данных
 
 ```bash
 git clone https://github.com/PavelKonoplev-PPP/hackathon.git
 cd hackathon
-./scripts/fetch_data.sh     # скачает CSV в папку Исходники/
-cp .env.example .env        # заполните настройки
+cp .env.example .env
+# Измените POSTGRES_PASSWORD в .env
+docker compose up -d postgres
+./scripts/fetch_data.sh
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r db/requirements.txt
+python db/load_csv.py
+python db/inspect_db.py
 ```
 
-Как работаем командой — в [CONTRIBUTING.md](CONTRIBUTING.md).
+Условия CSV, соглашения по именам таблиц и подключение backend описаны
+в [db/README.md](db/README.md).
+
+## Запуск интерфейса (демо-режим)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Откройте http://localhost:3000. Пока там заранее подготовленные примеры;
+реальный backend ещё не подключён.
+
+Правила работы команды: [CONTRIBUTING.md](CONTRIBUTING.md).
