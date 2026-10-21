@@ -314,3 +314,21 @@ python db/discover_relationships.py --catalog data/schema-catalog.json --output 
 неизвестных бизнес-связей по разным форматам ID нужна таблица
 соответствий и ручное подтверждение. Роль БД только для чтения.
 Повторный импорт данных требует нового каталога и новой проверки связей.
+
+## Аудит идентификаторов без устойчивого префикса
+
+После создания `data/relationships.json` проверьте оставшиеся ID
+на **всём объёме** таблиц, а не только по выборке:
+
+```bash
+python db/audit_identifiers.py --relationships data/relationships.json --output data/unprefixed-id-audit.json
+```
+
+Скрипт читает только поля, у которых в отчёте `dominant_prefix=null`.
+Для каждого поля считает `total_rows`, `missing_rows`, `distinct_keys`,
+`duplicate_rows`, `repeating_keys`, `rows_in_repeating_keys`,
+`max_rows_per_key`, `numeric_only_keys`; сами значения не выдаёт.
+`can_group_by=true` означает только наличие ключей для группировки в
+пределах одной таблицы, но **не** разрешает `JOIN` с другой таблицей.
+Все `can_auto_join=false` до явной проверки бизнес-семантики.
+Полный аудит читает всю таблицу и может потребовать времени.
