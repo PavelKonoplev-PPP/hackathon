@@ -74,6 +74,64 @@ ORDER BY ordinal_position;
 Скрипт импорта использует учётную запись владельца только для настройки
 локальных тестовых таблиц.
 
+## Отдельный пользователь для backend / LLM (только чтение)
+
+После загрузки CSV настройте роль `bi_reader`. В корне проекта:
+
+```bash
+# Выполняет db/setup_readonly.sql внутри контейнера, без копирования файлов в контейнер
+docker compose exec -T postgres psql -U bi_user -d hackathon -v ON_ERROR_STOP=1 < db/setup_readonly.sql
+
+# Устанавливаем пароль интерактивно, чтобы не оставлять его в shell history
+docker compose exec postgres psql -U bi_user -d hackathon
+```
+
+В интерактивной консоли `psql` выполните `\password bi_reader`, дважды
+введите **новый** пароль (он не отобразится), затем `\q`.
+Не присылайте пароль в чат и не сохраняйте его в Git.
+
+Проверьте соединение **именно по TCP с проверкой пароля**:
+
+```bash
+docker compose exec postgres psql -h 127.0.0.1 -U bi_reader -d hackathon -W
+```
+
+Войдя как `bi_reader`, проверьте:
+
+```sql
+SHOW transaction_read_only;
+SELECT count(*) FROM raw."data_01_Продажи";
+SELECT
+    has_table_privilege(current_user, 'raw."data_01_Продажи"', 'SELECT') AS can_select,
+    has_table_privilege(current_user, 'raw."data_01_Продажи"', 'INSERT') AS can_insert,
+    has_table_privilege(current_user, 'raw."data_01_Продажи"', 'UPDATE') AS can_update,
+    has_table_privilege(current_user, 'raw."data_01_Продажи"', 'DELETE') AS can_delete;
+```
+
+Ожидаем `on`, `500000` и соответственно `true/false/false/false`.
+Для выхода используйте `\q`. Тесты не изменяют данные.
+
+**Контракт для backend:** приложение использует `bi_reader` вместо владельца
+`bi_user`, параметры подключения должны храниться в **локальном** `.env`
+или другом менеджере секретов. Для контейнера backend в той же Docker Compose
+сети хост — `postgres`, порт — `5432`; для запуска на Mac хост —
+`127.0.0.1`. Локальная PostgreSQL не открыта во внешнюю сеть.
+
+Скрипт даёт `SELECT` на текущие таблицы `raw` и
+`bi_meta.imports`, а также на новые таблицы `raw`, созданные тем же
+владельцем импортёра (`bi_user`). Если CSV будут импортироваться от другого
+владельца, будущие права нужно настроить отдельно.
+
+**Ограничения безопасности:** настройка роли защищает исходные таблицы от
+изменений, но не заменяет проверку сгенерированного SQL. Backend всё равно
+должен запускать проверенные запросы в явно read-only транзакциях, ограничивать
+время/число строк и блокировать DDL, DML и потенциально опасные функции.
+`default_transaction_read_only` и `statement_timeout` — значения по
+умолчанию, а не абсолютные запреты для любого возможного SQL. Привилегия
+`TEMP` на базу в PostgreSQL может быть у `PUBLIC`: доступ только для чтения
+относится к **постоянным исходным таблицам**, а не означает полного отсутствия
+операций с временными объектами.
+
 ## Границы этой задачи
 
 `load_csv.py` — **утилита команды для заполнения тестовой БД**.
