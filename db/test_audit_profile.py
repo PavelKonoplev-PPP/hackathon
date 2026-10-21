@@ -28,9 +28,12 @@ class AuditProfileTests(unittest.TestCase):
         self.assertEqual([c["kind"] for c in selected], ["decimal", "timestamp", "date"])
         self.assertNotIn("Код заказа", [c["column"] for c in selected])
 
-    def test_filter_and_limit(self):
+    @patch("audit_profile.audit_column")
+    def test_filter_and_limit(self, audit):
         selected = collect_candidates(PROFILE, "data_01_Продажи")
         self.assertEqual(len(selected), 2)
+        audit.return_value = {"total_rows": 1, "missing_rows": 0,
+                              "invalid_rows": 0, "convertible_rows": 1}
         self.assertEqual(len(audit_profile(Mock(), PROFILE, limit=1)["columns"]), 1)
 
     def test_reject_bad_schema_or_missing_table(self):
