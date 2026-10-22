@@ -1,0 +1,8 @@
+# Модель для локальной разработки с увеличенным контекстом.
+# По умолчанию Ollama даёт ~4096 токенов и молча обрезает длинный промпт,
+# а сводка каталога занимает ~5000. Создать один раз:
+#   ollama create qwen-bi -f backend/llm/Modelfile
+# и указать в .env: LLM_MODEL=qwen-bi
+FROM qwen2.5:3b
+PARAMETER num_ctx 12288
+PARAMETER temperature 0.2
