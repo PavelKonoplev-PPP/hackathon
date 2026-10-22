@@ -1,15 +1,15 @@
 from fastapi import APIRouter, HTTPException
 
-from app.api.schemas import (
+from .schemas import (
     AskRequest,
     AskResponse,
     ChatRequest,
     ChatResponse,
     HealthResponse,
 )
-from app.db.session import check_db
-from app.llm.client import LLMError
-from app.services import agent
+from ..db.session import check_db
+from ..llm.client import LLMError
+from ..services import agent
 
 router = APIRouter()
 
@@ -36,7 +36,9 @@ def ask(body: AskRequest) -> AskResponse:
 def chat_endpoint(body: ChatRequest) -> ChatResponse:
     """Frontend-compatible chat endpoint adhering to docs/api-contract.md."""
     try:
-        text = agent.answer(body.message, session_id=body.session_id)
-    except LLMError as exc:
+        result = agent.process_chat_message(body.message, session_id=body.session_id)
+        return ChatResponse(**result)
+    except (LLMError, agent.AgentServiceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return ChatResponse(answer=text)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {exc}") from exc

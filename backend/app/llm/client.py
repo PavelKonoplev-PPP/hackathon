@@ -1,6 +1,6 @@
 import httpx
 
-from app.config import get_settings
+from ..config import get_settings
 
 
 class LLMError(RuntimeError):

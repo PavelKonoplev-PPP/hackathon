@@ -1,95 +1,114 @@
-import pytest
+import unittest
+from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
-from app.api import routes
-from app.llm.client import LLMError
-from app.main import app
-from app.services import agent
-
-client = TestClient(app)
-
-
-def test_health_reports_db_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(routes, "check_db", lambda: False)
-
-    response = client.get("/health")
-
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": False}
+try:
+    from backend.app.api import routes
+    from backend.app.db import session as db_session
+    from backend.app.llm.client import LLMError
+    from backend.app.main import app
+    from backend.app.services import agent
+except ImportError:
+    from app.api import routes
+    from app.db import session as db_session
+    from app.llm.client import LLMError
+    from app.main import app
+    from app.services import agent
 
 
-def test_api_health_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(routes, "check_db", lambda: True)
+class ApiTests(unittest.TestCase):
+    """Test suite for FastAPI endpoints and database connectivity."""
 
-    response = client.get("/api/health")
+    def setUp(self) -> None:
+        self.client = TestClient(app)
 
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": True}
+    @patch.object(routes, "check_db", return_value=False)
+    def test_health_reports_db_status(self, mock_check: MagicMock) -> None:
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "database": False})
 
+    @patch.object(routes, "check_db", return_value=True)
+    def test_api_health_alias(self, mock_check: MagicMock) -> None:
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok", "database": True})
 
-def test_ask_returns_answer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent, "chat", lambda messages, **kwargs: "ответ")
+    @patch.object(agent, "chat", return_value="ответ")
+    def test_ask_returns_answer(self, mock_chat: MagicMock) -> None:
+        response = self.client.post("/ask", json={"question": "Что в данных?"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"answer": "ответ"})
 
-    response = client.post("/ask", json={"question": "Что в данных?"})
+    @patch.object(agent, "chat", side_effect=LLMError("недоступна"))
+    def test_ask_returns_503_when_llm_down(self, mock_chat: MagicMock) -> None:
+        response = self.client.post("/ask", json={"question": "Что в данных?"})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("недоступна", response.json()["detail"])
 
-    assert response.status_code == 200
-    assert response.json() == {"answer": "ответ"}
+    def test_ask_rejects_empty_question(self) -> None:
+        response = self.client.post("/ask", json={"question": ""})
+        self.assertEqual(response.status_code, 422)
 
-
-def test_ask_returns_503_when_llm_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(messages, **kwargs):
-        raise LLMError("недоступна")
-
-    monkeypatch.setattr(agent, "chat", fail)
-
-    response = client.post("/ask", json={"question": "Что в данных?"})
-
-    assert response.status_code == 503
-    assert "недоступна" in response.json()["detail"]
-
-
-def test_ask_rejects_empty_question() -> None:
-    response = client.post("/ask", json={"question": ""})
-
-    assert response.status_code == 422
-
-
-def test_chat_returns_contract_response(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(agent, "chat", lambda messages, **kwargs: "Продажи составили 100 рублей")
-
-    response = client.post(
-        "/api/chat",
-        json={"session_id": "test-session-1", "message": "Сколько продаж?"},
+    @patch.object(
+        agent,
+        "process_chat_message",
+        return_value={
+            "answer": "Выручка составила 1 000 000 руб.",
+            "chart": {
+                "type": "bar",
+                "title": "Выручка",
+                "x_label": "Канал",
+                "y_label": "Рубли",
+                "categories": ["Розница", "Онлайн"],
+                "series": [{"name": "Выручка", "data": [600000, 400000]}],
+            },
+            "table": {
+                "columns": ["Канал", "Выручка"],
+                "rows": [["Розница", "600 000"], ["Онлайн", "400 000"]],
+            },
+            "sql": "SELECT canal, SUM(price) FROM t GROUP BY 1",
+            "clarification": None,
+        },
     )
+    def test_chat_returns_contract_response(self, mock_proc: MagicMock) -> None:
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-session-1", "message": "Сколько выручки?"},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["answer"], "Выручка составила 1 000 000 руб.")
+        self.assertEqual(data["chart"]["type"], "bar")
+        self.assertEqual(data["table"]["columns"], ["Канал", "Выручка"])
+        self.assertIn("SELECT", data["sql"])
+        self.assertIsNone(data["clarification"])
 
-    assert response.status_code == 200
-    data = response.json()
-    assert data["answer"] == "Продажи составили 100 рублей"
-    assert data["chart"] is None
-    assert data["table"] is None
-    assert data["sql"] is None
-    assert data["clarification"] is None
+    @patch.object(agent, "process_chat_message", side_effect=agent.AgentServiceError("LLM offline"))
+    def test_chat_returns_503_when_llm_down(self, mock_proc: MagicMock) -> None:
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-session-2", "message": "Любой вопрос"},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("LLM offline", response.json()["detail"])
+
+    def test_chat_rejects_empty_message(self) -> None:
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-session-3", "message": ""},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    @patch.object(db_session.psycopg, "connect")
+    def test_reader_connection_uses_bi_reader(self, mock_connect: MagicMock) -> None:
+        db_session.get_reader_connection()
+        mock_connect.assert_called_once()
+        kwargs = mock_connect.call_args[1]
+        self.assertEqual(kwargs["user"], "bi_reader")
+        self.assertIn("default_transaction_read_only=on", kwargs["options"])
+        self.assertIn("statement_timeout=", kwargs["options"])
 
 
-def test_chat_returns_503_when_llm_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(messages, **kwargs):
-        raise LLMError("LLM offline")
-
-    monkeypatch.setattr(agent, "chat", fail)
-
-    response = client.post(
-        "/api/chat",
-        json={"session_id": "test-session-2", "message": "Любой вопрос"},
-    )
-
-    assert response.status_code == 503
-    assert "LLM offline" in response.json()["detail"]
-
-
-def test_chat_rejects_empty_message() -> None:
-    response = client.post(
-        "/api/chat",
-        json={"session_id": "test-session-3", "message": ""},
-    )
-
-    assert response.status_code == 422
+if __name__ == "__main__":
+    unittest.main()

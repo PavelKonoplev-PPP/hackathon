@@ -1,10 +1,11 @@
 from collections.abc import Iterator
 
+import psycopg
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from ..config import get_settings
 
 _engine: Engine | None = None
 
@@ -21,6 +22,21 @@ def get_db() -> Iterator[Session]:
     """Provide a transactional database session generator."""
     with Session(get_engine()) as session:
         yield session
+
+
+def get_reader_connection() -> psycopg.Connection:
+    """Create a new read-only psycopg connection under the bi_reader role."""
+    settings = get_settings()
+    return psycopg.connect(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        dbname=settings.postgres_db,
+        user=settings.postgres_reader_user,
+        password=settings.reader_password,
+        connect_timeout=10,
+        autocommit=True,
+        options="-c default_transaction_read_only=on -c statement_timeout=15000",
+    )
 
 
 def check_db() -> bool:
