@@ -132,6 +132,7 @@ def process_chat_message(
                 raise AgentServiceError(f"Ошибка при описании данных: {exc}") from exc
 
         # Analytical SQL query
+        conn = None
         if runner is None:
             try:
                 conn = get_reader_connection()
@@ -143,6 +144,12 @@ def process_chat_message(
             return answer_question(message, catalog, runner)
         except Exception as exc:
             raise AgentServiceError(f"Ошибка при ответе на вопрос: {exc}") from exc
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     ans = answer(message, session_id=session_id)
     return {
