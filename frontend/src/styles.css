@@ -46,7 +46,39 @@ body {
   background: #fef3c7; color: #92400e;
 }
 
-main { flex: 1; min-height: 0; display: flex; justify-content: center; }
+.layout { flex: 1; min-height: 0; display: flex; }
+
+main { flex: 1; min-width: 0; min-height: 0; display: flex; justify-content: center; }
+
+.sidebar {
+  width: 260px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; overflow-y: auto;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.new-chat {
+  padding: 10px 12px; border-radius: 10px; cursor: pointer; text-align: left;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text); font: inherit;
+}
+.new-chat:hover { border-color: var(--accent); }
+.dialogs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dialog {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+}
+.dialog:hover { background: var(--bg); }
+.dialog-active { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
+.dialog-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.dialog-busy {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+  animation: blink 1.2s infinite ease-in-out;
+}
+.dialog-delete {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 18px; line-height: 1; padding: 0 4px; border-radius: 4px; visibility: hidden;
+}
+.dialog:hover .dialog-delete, .dialog:focus-within .dialog-delete, .dialog-active .dialog-delete { visibility: visible; }
+.dialog-delete:hover { color: var(--error); }
+.scrim { display: none; }
+.menu-btn { display: none; }
 
 .chat {
   width: 100%; max-width: 860px;
@@ -124,7 +156,14 @@ th { color: var(--muted); font-weight: 600; }
 .typing span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
 
-@media (max-width: 600px) {
+@media (max-width: 700px) {
+  .menu-btn { display: inline-block; }
+  .sidebar {
+    position: fixed; z-index: 20; top: 0; bottom: 0; left: 0;
+    transform: translateX(-100%); transition: transform 0.2s;
+  }
+  .sidebar-open { transform: none; }
+  .scrim { display: block; position: fixed; inset: 0; z-index: 10; background: rgba(0, 0, 0, 0.4); }
   .bubble { max-width: 95%; }
   .chart { height: 260px; }
 }
