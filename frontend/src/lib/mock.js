@@ -7,7 +7,7 @@ export async function mockReply(message) {
   await delay(700)
   const q = message.toLowerCase()
 
-  if (q.includes('что') && (q.includes('данн') || q.includes('есть'))) {
+  if (q.includes('опиши данные') || (q.includes('что') && (q.includes('данн') || q.includes('есть')))) {
     return {
       answer:
         'Это данные интернет-магазина: продажи и возвраты товаров за период с октября 2024 года. ' +
@@ -62,7 +62,7 @@ export async function mockReply(message) {
     answer: 'Уточните, пожалуйста, что именно вы хотите узнать.',
     clarification: {
       question: 'Вот что я могу показать:',
-      options: ['Что есть в этих данных?', 'Продажи по каналам', 'Динамика продаж по месяцам'],
+      options: ['Опиши данные', 'Продажи по каналам', 'Динамика продаж по месяцам'],
     },
   }
 }
