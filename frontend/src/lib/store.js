@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendMessage } from './api.js'
+import { detectViewRequest, viewPhrase } from './chartViews.js'
 
 const KEY = 'bi-chat-conversations-v1'
 const TITLE_MAX = 40
@@ -62,6 +63,12 @@ export function useConversations() {
       return { conversations: [c, ...s.conversations], activeId: c.id }
     })
 
+  const setView = (convId, msgId, view) =>
+    update(convId, (c) => ({
+      ...c,
+      messages: c.messages.map((m) => (m.id === msgId ? { ...m, view } : m)),
+    }))
+
   const select = (id) => setState((s) => ({ ...s, activeId: id }))
 
   const remove = (id) =>
@@ -80,6 +87,24 @@ export function useConversations() {
     if (!message || !conv || loadingRef.current.has(id)) return
 
     const userMsg = { id: uuid(), role: 'user', text: message }
+
+    // «Покажи то же самое кругом»: меняем вид последнего результата локально, без запроса к бэкенду.
+    const wantedView = detectViewRequest(message)
+    const source = wantedView && [...conv.messages].reverse().find((m) => m.chart)
+    if (source) {
+      const botMsg = {
+        id: uuid(),
+        role: 'assistant',
+        text: `Вот то же самое ${viewPhrase(wantedView)}.`,
+        chart: source.chart,
+        table: source.table,
+        sql: source.sql,
+        view: wantedView,
+      }
+      update(id, (c) => ({ ...c, messages: [...c.messages, userMsg, botMsg], updatedAt: Date.now() }))
+      return
+    }
+
     update(id, (c) => ({
       ...c,
       title: c.messages.length === 0 ? makeTitle(message) : c.title,
@@ -123,5 +148,6 @@ export function useConversations() {
     select,
     remove,
     send,
+    setView,
   }
 }
