@@ -5,7 +5,7 @@ import { useConversations } from './lib/store.js'
 import { isMock } from './lib/api.js'
 
 export default function App() {
-  const { conversations, active, loadingIds, create, select, remove, send } = useConversations()
+  const { conversations, active, loadingIds, create, select, remove, send, setView } = useConversations()
   const [menuOpen, setMenuOpen] = useState(false)
 
   return (
@@ -35,7 +35,7 @@ export default function App() {
           onDelete={remove}
         />
         <main>
-          <Chat conversation={active} loading={loadingIds.includes(active.id)} onSend={send} />
+          <Chat conversation={active} loading={loadingIds.includes(active.id)} onSend={send} onChangeView={setView} />
         </main>
       </div>
     </div>
