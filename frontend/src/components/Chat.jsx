@@ -7,7 +7,7 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-export default function Chat({ conversation, loading, onSend }) {
+export default function Chat({ conversation, loading, onSend, onChangeView }) {
   const [input, setInput] = useState('')
   const endRef = useRef(null)
 
@@ -48,7 +48,7 @@ export default function Chat({ conversation, loading, onSend }) {
         )}
 
         {conversation.messages.map((m) => (
-          <Message key={m.id} msg={m} onPickOption={send} />
+          <Message key={m.id} msg={m} onPickOption={send} onChangeView={(msgId, view) => onChangeView(conversation.id, msgId, view)} />
         ))}
 
         {loading && (
