@@ -36,7 +36,7 @@ function buildOption(spec, dark) {
       data: spec.categories,
       name: spec.x_label,
       axisLine: { lineStyle: { color: grid } },
-      axisLabel: { color: text },
+      axisLabel: { color: text, interval: 0, width: 90, overflow: 'break' },
     },
     yAxis: {
       type: 'value',
