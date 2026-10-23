@@ -3,7 +3,7 @@ import Message from './Message.jsx'
 import { sendMessage } from '../lib/api.js'
 
 const SUGGESTIONS = [
-  'Что есть в этих данных?',
+  'Опиши данные',
   'Продажи по каналам',
   'Динамика продаж по месяцам',
 ]
