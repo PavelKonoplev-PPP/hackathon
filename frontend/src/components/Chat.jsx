@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import Message from './Message.jsx'
-import { sendMessage } from '../lib/api.js'
 
 const SUGGESTIONS = [
   'Опиши данные',
@@ -8,74 +7,18 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-const STORAGE_KEY = 'bi-chat-state'
-
-function loadState() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {
-    // sessionStorage может быть недоступен — работаем без него
-  }
-  return { sessionId: crypto.randomUUID(), messages: [] }
-}
-
-export default function Chat({ resetKey }) {
-  const [state, setState] = useState(loadState)
+export default function Chat({ conversation, loading, onSend }) {
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
   const endRef = useRef(null)
 
   useEffect(() => {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-    } catch {
-      // игнорируем
-    }
-  }, [state])
-
-  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [state.messages, loading])
+  }, [conversation.id, conversation.messages, loading])
 
-  // Кнопка «Новый диалог» меняет resetKey
-  useEffect(() => {
-    if (resetKey > 0) {
-      setState({ sessionId: crypto.randomUUID(), messages: [] })
-      setInput('')
-    }
-  }, [resetKey])
-
-  async function send(text) {
-    const message = text.trim()
-    if (!message || loading) return
-    const userMsg = { id: crypto.randomUUID(), role: 'user', text: message }
-    setState((s) => ({ ...s, messages: [...s.messages, userMsg] }))
+  function send(text) {
+    if (!text.trim() || loading) return
+    onSend(conversation.id, text)
     setInput('')
-    setLoading(true)
-    try {
-      const reply = await sendMessage(state.sessionId, message)
-      const botMsg = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        text: reply.answer,
-        chart: reply.chart,
-        table: reply.table,
-        sql: reply.sql,
-        clarification: reply.clarification,
-      }
-      setState((s) => ({ ...s, messages: [...s.messages, botMsg] }))
-    } catch (e) {
-      const errMsg = {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        error: true,
-        text: 'Не удалось получить ответ. Проверьте, что сервер запущен, и попробуйте ещё раз.',
-      }
-      setState((s) => ({ ...s, messages: [...s.messages, errMsg] }))
-    } finally {
-      setLoading(false)
-    }
   }
 
   function onKeyDown(e) {
@@ -85,7 +28,7 @@ export default function Chat({ resetKey }) {
     }
   }
 
-  const empty = state.messages.length === 0
+  const empty = conversation.messages.length === 0
 
   return (
     <div className="chat">
@@ -104,7 +47,7 @@ export default function Chat({ resetKey }) {
           </div>
         )}
 
-        {state.messages.map((m) => (
+        {conversation.messages.map((m) => (
           <Message key={m.id} msg={m} onPickOption={send} />
         ))}
 
@@ -133,7 +76,6 @@ export default function Chat({ resetKey }) {
           onKeyDown={onKeyDown}
           placeholder="Например: какие продажи по регионам?"
           rows={1}
-          disabled={loading}
         />
         <button type="submit" disabled={loading || !input.trim()}>
           Отправить
