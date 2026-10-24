@@ -337,3 +337,39 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
                 problems.append(f"Фильтр \"{column}\" = '{literal}' не упоминается в вопросе — "
                                 "убери его.")
     return problems
+
+
+# ---------- вид графика по просьбе пользователя (issue #16) ----------
+
+VIEW_PATTERNS = [
+    ("pie", r"кругов\w*|кругом|пирог\w*"),
+    ("line", r"линейн\w*|линией|линиями|линию"),
+    ("bar", r"столбч\w*|столбц\w*|столбик\w*|гистограмм\w*"),
+    ("table", r"таблицей|в\s+виде\s+таблицы|как\s+таблицу|таблично"),
+]
+_VIEW_FILLER = {"покажи", "показать", "отобрази", "отобразить", "сделай", "нарисуй", "построй",
+                "давай", "можно", "пожалуйста", "это", "этот", "эти", "тоже", "самое", "же", "то",
+                "в", "виде", "как", "а", "и", "теперь", "график", "графиком", "графике",
+                "диаграмма", "диаграммой", "диаграмму", "диаграмме", "вид", "лучше", "мне", "его",
+                "их", "результат", "ответ", "данные", "на", "по", "форме", "формате", "вместо"}
+
+
+def requested_view(text: str) -> str | None:
+    """«покажи кругом» -> 'pie'; «по месяцам линией» -> 'line'; иначе None."""
+    low = text.lower()
+    for view, pattern in VIEW_PATTERNS:
+        if re.search(pattern, low):
+            return view
+    return None
+
+
+def is_pure_view_request(text: str) -> bool:
+    """Только смена вида («покажи то же самое кругом»), без новых условий («по месяцам линией»)."""
+    view = requested_view(text)
+    if not view:
+        return False
+    low = text.lower()
+    for _, pattern in VIEW_PATTERNS:
+        low = re.sub(pattern, " ", low)
+    rest = [w for w in re.findall(r"[а-яёa-z0-9]+", low) if w not in _VIEW_FILLER]
+    return not rest

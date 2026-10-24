@@ -38,6 +38,18 @@ class IntentTests(unittest.TestCase):
         self.assertFalse(mentions("Выручка по каналам", "Интернет-магазин"))
 
 
+class ViewTests(unittest.TestCase):
+    def test_views(self):
+        from backend.llm.semantics import is_pure_view_request, requested_view
+        self.assertEqual(requested_view("Покажи то же самое кругом"), "pie")
+        self.assertTrue(is_pure_view_request("Покажи то же самое кругом"))
+        self.assertTrue(is_pure_view_request("сделай столбцами, пожалуйста"))
+        self.assertTrue(is_pure_view_request("в виде таблицы"))
+        self.assertEqual(requested_view("А теперь по месяцам линией"), "line")
+        self.assertFalse(is_pure_view_request("А теперь по месяцам линией"))
+        self.assertIsNone(requested_view("покажи таблицу продаж"))
+
+
 class AdjustTests(unittest.TestCase):
     def test_limit_removed_without_top(self):
         sql = 'SELECT "Месяц", COUNT(*) FROM t GROUP BY 1 ORDER BY 2 DESC LIMIT 10'
