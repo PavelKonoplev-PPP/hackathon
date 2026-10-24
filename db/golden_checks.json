@@ -82,7 +82,7 @@
     {
       "id": "sales_channel_mobile",
       "description": "Продажи: мобильное приложение",
-      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Моб. приложение'",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Мобильное приложение'",
       "expected": 214505,
       "question": "Сколько строк продаж приходится на мобильное приложение?"
     },
@@ -96,7 +96,7 @@
     {
       "id": "sales_channel_retail",
       "description": "Продажи: розница",
-      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Розничный'",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Розничный магазин'",
       "expected": 100032,
       "question": "Сколько строк продаж через розничный канал?"
     },
@@ -110,7 +110,7 @@
     {
       "id": "sales_channel_partition",
       "description": "Три канала покрывают все строки",
-      "sql": "SELECT (COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Моб. приложение') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Интернет-магазин') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Розничный') = COUNT(*)) FROM raw.\"data_01_Продажи\"",
+      "sql": "SELECT (COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Мобильное приложение') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Интернет-магазин') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Розничный магазин') = COUNT(*)) FROM raw.\"data_01_Продажи\"",
       "expected": true,
       "question": null
     },
@@ -159,7 +159,7 @@
     {
       "id": "sales_mobile_or_online",
       "description": "Мобильный + интернет",
-      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" IN ('Моб. приложение','Интернет-магазин')",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" IN ('Мобильное приложение','Интернет-магазин')",
       "expected": 399968,
       "question": null
     },
@@ -173,7 +173,7 @@
     {
       "id": "sales_nonmobile",
       "description": "Не мобильное приложение",
-      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" <> 'Моб. приложение'",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" <> 'Мобильное приложение'",
       "expected": 285495,
       "question": null
     }
