@@ -1,12 +1,16 @@
 """Сценарий 2 (issue #4): ответ на вопрос по данным.
 
 Шаги (каждый — короткий запрос, чтобы справлялась и маленькая модель):
-1. Выбор таблицы: модель видит названия таблиц и колонок, отвечает номером.
-2. SQL: модель видит только колонки выбранной таблицы `t` с типами и
-   значениями категорий; пишет один SELECT.
-3. Проверка (sql_guard) и выполнение (sql_runner). При ошибке модель получает
-   её текст и исправляет запрос (до 3 попыток).
-4. Объяснение: модель пересказывает результат (числа уже отформатированы кодом).
+0. Контекст диалога (по session_id): ответ на уточнение, продолжение прошлого
+   вопроса («а теперь только за сентябрь»), отказ от изменения данных.
+1. Выбор таблицы кодом: слова вопроса сравниваются с названиями таблиц, колонок
+   и значениями категорий. Ничья — уточняющий вопрос; ничего общего — вежливый отказ.
+2. Неоднозначная единица счёта («сколько продаж?» — строк или заказов?) — уточнение.
+3. SQL: модель видит колонки выбранной таблицы `t` с типами и значениями категорий.
+4. Проверка безопасности (sql_guard) и смысла (semantics): «сколько» — COUNT/SUM,
+   «разных» — DISTINCT, LIMIT только для топа, фильтры только из вопроса.
+   Ошибку модель получает обратно и исправляет запрос (до 3 попыток).
+5. Объяснение: модель пересказывает результат (числа уже отформатированы кодом).
 
 Запуск из корня проекта (нужна запущенная база и Ollama):
     python -m backend.llm.ask "Какой канал продаж приносит больше всего выручки?"
@@ -21,21 +25,29 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
+from collections import OrderedDict
+
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int
+from .semantics import (Intent, adjust_sql, check_sql, counted_noun, overlap, same_word,
+                        strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
 
 MAX_ATTEMPTS = 3
 EXPLAIN_ROWS = 20
 
-PICK_PROMPT = """Ты помогаешь найти данные для ответа на вопрос.
-Ниже пронумерованный список таблиц с их колонками.
-Ответь ТОЛЬКО номером таблицы (одно число), по которой лучше всего ответить на вопрос."""
-
-STOP_WORDS = {"какой", "какая", "какие", "каких", "какое", "сколько", "больше", "меньше",
-              "всего", "самый", "самая", "самые", "каждый", "каждого", "который", "среди",
-              "между", "через", "покажи", "показать", "посчитай", "данные", "данных",
-              "таблица", "таблицы", "приносит", "лучше", "хуже", "чаще", "среднее"}
+WRITE_INTENT = re.compile(
+    r"\b(удал\w*|измен\w*|обнови\w*|перезапиш\w*|очист\w*|вставь|добавь\s+(строк|запис)\w*|"
+    r"drop|delete|truncate|insert|update|alter)\b", re.IGNORECASE)
+ANALYTIC_WORDS = re.compile(r"сколько|средн|сумм|доля|процент|динамик|\bтоп|самы|количеств|"
+                            r"сравн|рост|паден|выручк|расход|итог|посчитай|распределен|"
+                            r"по месяцам|по годам|больше всего|меньше всего|чаще|реже|"
+                            r"\bпо\s+\w+(ам|ям)\b|в каждом|в каждой", re.IGNORECASE)
+FOLLOWUP_START = re.compile(r"^\s*(а|и|теперь|только|то же|тоже|также|так же|сравни|"
+                            r"а теперь|а если|а за|а по|а для|а в|а без|а с|ещё|еще)\b",
+                            re.IGNORECASE)
+FOLLOWUP_WORDS = re.compile(r"\b(это|этот|эти|этого|то же|те же|то же самое|предыдущ\w*|"
+                            r"прошл\w*\s+(запрос|вопрос))\b", re.IGNORECASE)
 
 SQL_PROMPT = """Ты пишешь SQL для PostgreSQL 16. Все данные — в одной таблице t.
 
@@ -45,13 +57,19 @@ SQL_PROMPT = """Ты пишешь SQL для PostgreSQL 16. Все данные 
 Правила:
 - Ровно один запрос SELECT ... FROM t. Никаких других таблиц и команд.
 - Числа и даты в t уже нужного типа: не преобразуй их и не меняй запятые.
-- Месяц: date_trunc('month', "колонка с датой"); год: date_trunc('year', ...).
-- Давай результатам понятные русские имена: AS "Выручка, руб.".
+- «Сколько» — это всегда агрегат: COUNT(*) для числа строк/операций,
+  SUM("колонка") для штук и денег. Никогда не отвечай списком строк.
+- «Разных», «уникальных» X — COUNT(DISTINCT "X").
+- WHERE добавляй только для условий, которые есть в вопросе. Значения категорий
+  бери только из списка, написание — точно как в списке.
+- LIMIT только если просят «топ», «самые», «первые N». Иначе выведи все группы.
+- По месяцам: GROUP BY date_trunc('month', "дата") и ORDER BY по этой дате;
+  по годам — date_trunc('year', ...).
+- Разница во времени в часах: EXTRACT(EPOCH FROM ("конец" - "начало")) / 3600.
+- Доля в процентах: 100.0 * COUNT(*) FILTER (WHERE условие) / COUNT(*).
 - Сумма денег (выручка, оборот) = количество × цена за единицу; если есть скидка
   в процентах — умножай ещё на (1 - скидка / 100.0).
-- Для «какой самый», «больше всего», «топ» — сгруппируй по нужной колонке и выведи
-  все группы по убыванию: ORDER BY ... DESC LIMIT 10.
-- Для фильтра по категории используй только значения из списка.
+- Давай результатам понятные русские имена: AS "Выручка, руб.".
 - Ответь только SQL в блоке ```sql ... ```, без пояснений.
 {hint}
 Пример. Вопрос: «{example_q}»
@@ -92,12 +110,14 @@ def _example(table: dict) -> tuple[str, str]:
             name = col["name"]
             return (f"Сколько записей по каждому значению «{name}»?",
                     f'SELECT "{name}", COUNT(*) AS "Количество"\nFROM t\n'
-                    f'GROUP BY "{name}"\nORDER BY "Количество" DESC\nLIMIT 10')
+                    f'GROUP BY "{name}"\nORDER BY "Количество" DESC')
     return "Сколько всего записей?", 'SELECT COUNT(*) AS "Количество" FROM t'
 
 
 def build_sql_messages(question: str, table: dict, values: dict[str, list[str]],
-                       history: list[dict] | None = None) -> list[dict]:
+                       history: list[dict] | None = None,
+                       previous: dict | None = None) -> list[dict]:
+    """previous — прошлый вопрос и SQL в этом диалоге, если новый вопрос его уточняет."""
     columns = "\n".join(_column_line(c, values) for c in table.get("columns") or [])
     example_q, example_sql = _example(table)
     mentioned = mentioned_columns(question, table)
@@ -105,69 +125,128 @@ def build_sql_messages(question: str, table: dict, values: dict[str, list[str]],
             + ", ".join(f'"{c}"' for c in mentioned) + ".\n") if mentioned else ""
     system = SQL_PROMPT.format(columns=columns, example_q=example_q,
                                example_sql=example_sql, hint=hint)
-    return [{"role": "system", "content": system},
-            {"role": "user", "content": f"Вопрос: {question}"},
-            *(history or [])]
+    messages = [{"role": "system", "content": system}]
+    if previous:
+        messages += [
+            {"role": "user", "content": f"Вопрос: {previous['question']}"},
+            {"role": "assistant", "content": f"```sql\n{previous['sql']}\n```"},
+            {"role": "user", "content": f"Уточнение к предыдущему вопросу: {question}\n"
+                                        "Измени предыдущий запрос: сохрани показатель и "
+                                        "группировку, поменяй только то, о чём просят."},
+        ]
+    else:
+        messages.append({"role": "user", "content": f"Вопрос: {question}"})
+    return messages + list(history or [])
 
 
-def _stems(text: str) -> set[str]:
-    """Грубые основы слов: первые 5 букв (продаж/продажи/продажам -> продa...)."""
-    words = re.findall(r"[а-яёa-z]+", text.lower().replace("_", " "))
-    return {w[:5] for w in words if len(w) >= 4 and w not in STOP_WORDS}
+def mentioned_columns(question: str, table: dict, limit: int = 3) -> list[str]:
+    """До трёх колонок, лучше всего совпадающих со словами вопроса (подсказка модели).
+    Коды/ID и даты-события, совпавшие одним словом, не предлагаем — они чаще шумят;
+    но в вопросе «уникальных покупателей» код покупателя — как раз то, что нужно."""
+    distinct = Intent.parse(question).wants_distinct
+    table_words = words(display_table_name(table["name"]))
+    # слова из названия таблицы («продаж» в «Продажах») не отличают колонки друг от друга
+    asked = {q for q in words(question) if not any(same_word(q, w) for w in table_words)}
+    scored = []
+    for i, col in enumerate(table.get("columns") or []):
+        hits = overlap(asked, words(col["name"]))
+        if not hits:
+            continue
+        kind = col.get("inferred_type")
+        if distinct and kind == "identifier":
+            scored.append((-hits - 1, i, col["name"]))  # идентификатор — вперёд
+            continue
+        noisy = kind in ("identifier", "date", "timestamp")
+        if noisy and hits < 2:
+            continue
+        scored.append((-hits, i, col["name"]))
+    return [name for _, _, name in sorted(scored)[:limit]]
 
 
-def mentioned_columns(question: str, table: dict) -> list[str]:
-    """Колонки, слова из названий которых есть в вопросе (подсказка для модели)."""
-    asked = _stems(question)
-    return [c["name"] for c in table.get("columns") or [] if asked & _stems(c["name"])]
-
-
-def keyword_scores(question: str, tables: list[dict]) -> list[int]:
-    """Сколько основ слов вопроса встречается в названии таблицы и её колонках."""
-    asked = _stems(question)
+def keyword_scores(question: str, tables: list[dict],
+                   values_by_table: dict[str, dict[str, list[str]]] | None = None,
+                   detail: list | None = None) -> list[int]:
+    """Насколько вопрос похож на таблицу. Каждое слово вопроса считается один раз:
+    совпало с названием таблицы — 2 очка, с колонкой или значением категории — 1.
+    detail (необязательно) получает для каждой таблицы число надёжных совпадений с
+    названием таблицы или колонок (почти та же словоформа) — для разрешения ничьих."""
+    asked = words(question)
     scores = []
     for t in tables:
-        name_stems = _stems(display_table_name(t["name"]))
-        col_stems = set().union(*(_stems(c["name"]) for c in t.get("columns") or []))
-        scores.append(2 * len(asked & name_stems) + len(asked & col_stems))
+        name_words = words(display_table_name(t["name"]))
+        col_words = set().union(*(words(c["name"]) for c in t.get("columns") or []))
+        values = (values_by_table or {}).get(t["name"]) or {}
+        # длинные описательные значения («Недостаточно прав для выполнения операции») шумят
+        value_words = set().union(set(), *(words(v) for vs in values.values() for v in vs
+                                           if len(v.split()) <= 3))
+        score = structural = 0
+        for q in asked:
+            if any(same_word(q, w) for w in name_words):
+                score += 2
+                structural += 1
+            elif any(same_word(q, w) for w in col_words):
+                score += 1
+                structural += any(strong_word(q, w) for w in col_words)
+            elif any(same_word(q, w) for w in value_words):
+                score += 1
+        scores.append(score)
+        if detail is not None:
+            detail.append(structural)
     return scores
 
 
-def pick_table(client, question: str, catalog: dict, say=None) -> dict | None:
-    """Модель выбирает таблицу; совпадение слов страхует от её ошибок."""
-    tables = catalog.get("tables") or []
+def choose_table(question: str, tables: list[dict], values_by_table: dict) -> tuple[dict | None, list[dict]]:
+    """(таблица, []) — выбрана; (None, кандидаты) — нужна помощь пользователя.
+    Кандидатов нет — вопрос не про эти данные."""
     if not tables:
-        return None
-    listing = "\n".join(
-        f"{i}. {display_table_name(t['name'])}: "
-        + ", ".join(c["name"] for c in t.get("columns") or [])
-        for i, t in enumerate(tables, 1)
-    )
-    reply = client.chat([
-        {"role": "system", "content": PICK_PROMPT},
-        {"role": "user", "content": f"Таблицы:\n{listing}\n\nВопрос: {question}\nНомер таблицы:"},
-    ], max_tokens=10, temperature=0)
-    if say:
-        say(f"Модель выбрала: {reply.strip()[:40]!r}")
+        return None, []
+    structural: list[int] = []
+    scores = keyword_scores(question, tables, values_by_table, structural)
+    order = sorted(range(len(tables)), key=lambda i: -scores[i])
+    best = scores[order[0]]
+    analytic = bool(ANALYTIC_WORDS.search(question))
+    # «Какая погода в Москве?» — совпало только значение «Москва», а вопрос не аналитический
+    if best == 0 or (not analytic and max(structural) == 0):
+        if analytic:
+            return None, tables  # аналитический вопрос без зацепок — спросим, о каких данных
+        return None, []
+    matched = [i for i in order if scores[i] > 0]
+    if len(words(question)) <= 1 and len(matched) > 1 and best < 2:
+        return None, [tables[i] for i in matched[:4]]  # одно слово, несколько таблиц — мало данных
+    tied = [i for i in order if scores[i] == best]
+    if len(tied) > 1:  # при равенстве важнее совпадения с названиями колонок, а не значениями
+        top_structural = max(structural[i] for i in tied)
+        tied = [i for i in tied if structural[i] == top_structural]
+    if len(tied) == 1:
+        return tables[tied[0]], []
+    return None, [tables[i] for i in tied[:4]]
 
-    scores = keyword_scores(question, tables)
-    best = max(range(len(tables)), key=lambda i: scores[i])
 
-    choice = None
-    match = re.search(r"\d+", reply)
-    if match and 1 <= int(match.group()) <= len(tables):
-        choice = int(match.group()) - 1
-    else:
-        for i, t in enumerate(tables):  # модель назвала таблицу словами
-            if display_table_name(t["name"]).lower() in reply.lower():
-                choice = i
-                break
+def unit_options(question: str, intent: Intent, table: dict) -> list[tuple[str, str]]:
+    """«Сколько продаж?», когда строка таблицы — позиция заказа: считать строки или
+    уникальные заказы? Возвращает варианты (текст кнопки, уточнение к вопросу) или [].
 
-    if choice is not None and not (scores[choice] == 0 and scores[best] >= 2):
-        return tables[choice]
-    if scores[best] > 0:  # модель не ответила или явно промахнулась
-        return tables[best]
-    return None
+    Уточняем, только если у таблицы есть уникальный код строки, который НЕ совпадает
+    со считаемым словом («Код позиции» ≠ «продаж»), и есть «групповой» код с высокой
+    кардинальностью («Код заказа»). «Сколько событий» при «Код события» — однозначно строки."""
+    if not intent.is_count or intent.has_unit or intent.wants_distinct:
+        return []
+    noun = counted_noun(question)
+    table_words = words(display_table_name(table["name"]))
+    if not noun or not any(same_word(noun, w) for w in table_words):
+        return []
+    ids = [c for c in table.get("columns") or []
+           if c.get("inferred_type") == "identifier" and not c.get("warning") and c.get("sample_rows")]
+    unique = [c for c in ids if (c.get("sample_distinct") or 0) >= c["sample_rows"]]
+    if not unique or any(same_word(noun, w) for c in unique for w in words(c["name"])):
+        return []
+    groups = [c for c in ids if 0.5 * c["sample_rows"] <= (c.get("sample_distinct") or 0) < c["sample_rows"]]
+    groups = sorted(groups, key=lambda c: -(c.get("sample_distinct") or 0))[:2]
+    if not groups:
+        return []
+    return ([("Количество строк (записей)", "считать количество строк")]
+            + [(f"Количество уникальных: {c['name']}", f"считать количество уникальных «{c['name']}»")
+               for c in groups])
 
 
 # ---------- форматирование результата ----------
@@ -227,14 +306,6 @@ def result_text(columns: list[str], rows: list[tuple], truncated: bool) -> str:
     if truncated or len(rows) > EXPLAIN_ROWS:
         lines.append(f"(показаны первые {shown} строк, результат неполный)")
     return "\n".join(lines)
-
-
-def widen_top1(sql: str) -> str:
-    """«Какой самый...» модель часто решает через LIMIT 1 — для сравнения
-    полезнее видеть все группы (и строить график)."""
-    if re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE):
-        return re.sub(r"\blimit\s+1\s*$", "LIMIT 10", sql, flags=re.IGNORECASE)
-    return sql
 
 
 def answer_looks_good(answer: str, columns: list[str], rows: list[tuple]) -> bool:
@@ -301,66 +372,201 @@ def template_answer(columns: list[str], rows: list[tuple], truncated: bool) -> s
     return f"Нашлось строк: {format_int(len(rows))}{more}. Результат — в таблице ниже."
 
 
+# ---------- память диалога ----------
+
+MAX_SESSIONS = 500
+_SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _session(session_id: str | None) -> dict:
+    """Аналитический контекст диалога: последний вопрос/таблица/SQL и ожидаемое уточнение.
+    Хранится в памяти процесса (для хакатона достаточно)."""
+    if not session_id:
+        return {}
+    state = _SESSIONS.pop(session_id, None) or {}
+    _SESSIONS[session_id] = state
+    while len(_SESSIONS) > MAX_SESSIONS:
+        _SESSIONS.popitem(last=False)
+    return state
+
+
+def reset_session(session_id: str) -> None:
+    _SESSIONS.pop(session_id, None)
+
+
+def _match_option(message: str, options: list[str]) -> int | None:
+    text = message.strip().lower().strip(".!")
+    for i, option in enumerate(options):
+        if text == option.lower():
+            return i
+    if text.isdigit() and 1 <= int(text) <= len(options):
+        return int(text) - 1
+    hits = [i for i, option in enumerate(options) if overlap(words(text), words(option))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def is_followup(question: str) -> bool:
+    return bool(FOLLOWUP_START.search(question) or FOLLOWUP_WORDS.search(question))
+
+
+def _values_for_all(runner, tables: list[dict]) -> dict:
+    values = {}
+    for t in tables:
+        try:
+            values[t["name"]] = runner.category_values(t)
+        except Exception:
+            values[t["name"]] = {}
+    return values
+
+
+def _refuse(text: str) -> dict:
+    return {"answer": text, "sql": None}
+
+
 # ---------- основной сценарий ----------
 
 def answer_question(question: str, catalog: dict, runner, client=None,
-                    progress=None) -> dict:
+                    progress=None, trace: dict | None = None,
+                    session_id: str | None = None) -> dict:
     """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification.
 
     runner — объект с методами run(table, sql) и category_values(table),
     например sql_runner.PostgresRunner.
+    trace — необязательный словарь; в него пишутся детали (таблица, SQL, сырые
+    строки результата, попытки, ошибки) — для тестов точности и отладки.
+    session_id — идентификатор диалога: включает память (уточнения и продолжения).
     """
+    trace = trace if trace is not None else {}
+    trace["errors"] = []
+    say = progress or (lambda msg: None)
     if client is None:
         from .client import LLMClient
         client = LLMClient()
-    say = progress or (lambda msg: None)
+    state = _session(session_id)
+    tables = catalog.get("tables") or []
+    by_name = {t["name"]: t for t in tables}
+    question = question.strip()
 
-    say("Выбираю таблицу")
-    table = pick_table(client, question, catalog, say)
-    if table is None:
-        names = [display_table_name(t["name"]) for t in catalog.get("tables") or []]
-        return {
-            "answer": "Не нашёл в данных, по какой таблице ответить на этот вопрос. "
-                      "Уточните, пожалуйста, о каких данных речь.",
-            "clarification": {"question": "О каких данных вопрос?", "options": names[:6]},
-        }
+    # 0. Ответ на наше уточнение?
+    forced_table = None
+    resolved_unit = False
+    pending = state.pop("pending", None)
+    if pending:
+        choice = _match_option(question, pending["options"])
+        if choice is not None:
+            say(f"Уточнение: {pending['options'][choice]}")
+            if pending["kind"] == "table":
+                forced_table = by_name.get(pending["tables"][choice])
+                question = pending["question"]
+            elif pending["kind"] == "unit":
+                forced_table = by_name.get(pending["table"])
+                question = f"{pending['question']} ({pending['units'][choice]})"
+                resolved_unit = True
+
+    if WRITE_INTENT.search(question):
+        return _refuse("Я работаю с данными только на чтение: могу считать и показывать, "
+                       "но не изменять и не удалять данные.")
+
+    # 1. Продолжение прошлого вопроса?
+    previous = None
+    last = state.get("last")
+    if not forced_table and last and is_followup(question) and last["table"] in by_name:
+        previous = last
+        forced_table = by_name[last["table"]]
+        say(f"Продолжение вопроса: «{last['question']}»")
+
+    # 2. Таблица
+    values_by_table = None
+    if forced_table is not None:
+        table = forced_table
+    else:
+        say("Выбираю таблицу")
+        values_by_table = _values_for_all(runner, tables)
+        table, candidates = choose_table(question, tables, values_by_table)
+        if table is None:
+            if not candidates:
+                return _refuse("Этот вопрос не похож на вопрос к загруженным данным. "
+                               "Я могу посчитать показатели по таблицам: "
+                               + ", ".join(f"«{display_table_name(t['name'])}»" for t in tables)
+                               + ". Например: «Какая выручка по каналам продаж?»")
+            options = [display_table_name(t["name"]) for t in candidates]
+            state["pending"] = {"kind": "table", "question": question, "options": options,
+                                "tables": [t["name"] for t in candidates]}
+            trace["clarification"] = "table"
+            return {"answer": "Подходит несколько таблиц. Уточните, пожалуйста, по каким данным считать.",
+                    "clarification": {"question": "По каким данным считать?", "options": options}}
+
     table_name = display_table_name(table["name"])
+    trace["table"] = table["name"]
     say(f"Таблица: {table_name}")
 
-    values = runner.category_values(table)
+    full_question = f"{previous['question']} {question}" if previous else question
+    intent = Intent.parse(full_question)
+
+    # 3. Единица счёта неоднозначна?
+    if not previous and not resolved_unit:
+        units = unit_options(question, intent, table)
+        if units:
+            options = [label for label, _ in units]
+            state["pending"] = {"kind": "unit", "question": question, "table": table["name"],
+                                "options": options, "units": [u for _, u in units]}
+            trace["clarification"] = "unit"
+            return {"answer": "Уточните, пожалуйста, что именно посчитать: в этой таблице одна "
+                              "строка — это позиция, а не целая операция.",
+                    "clarification": {"question": "Что считать?", "options": options}}
+
+    # 4. SQL с проверками
+    values = (values_by_table or {}).get(table["name"])
+    if values is None:
+        values = runner.category_values(table)
     column_names = [c["name"] for c in table.get("columns") or []]
+    numeric_columns = [c["name"] for c in table.get("columns") or []
+                       if column_kind(c) in ("integer", "decimal")]
+    table_words = words(display_table_name(table["name"]))
     history: list[dict] = []
-    last_error = ""
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        trace["attempts"] = attempt
         say(f"Пишу SQL (попытка {attempt})")
-        reply = client.chat(build_sql_messages(question, table, values, history),
-                            max_tokens=600, temperature=0)
+        reply = client_chat(client, build_sql_messages(question, table, values, history, previous))
         try:
-            sql = widen_top1(validate_sql(extract_sql(reply), column_names))
+            sql = adjust_sql(validate_sql(extract_sql(reply), column_names), intent)
+            sql, removed = strip_unmentioned_filters(sql, full_question, values, table_words)
+            if removed:
+                say(f"Убраны лишние фильтры: {'; '.join(removed)}")
+                trace.setdefault("removed_filters", []).extend(removed)
+            problems = check_sql(sql, full_question, intent, values,
+                                 strict=attempt < MAX_ATTEMPTS, ignore=table_words,
+                                 numeric_columns=numeric_columns, columns=column_names)
+            if problems:
+                raise SQLRejected(" ".join(problems))
             result = runner.run(table, sql)
             break
         except SQLRejected as exc:
             last_error = str(exc)
         except Exception as exc:  # ошибка базы: текст возвращаем модели
             last_error = f"Ошибка PostgreSQL: {str(exc).splitlines()[0]}"
+        trace["errors"].append(last_error)
         say(f"Ошибка: {last_error}")
         history += [{"role": "assistant", "content": reply},
                     {"role": "user", "content": f"{last_error}\nИсправь запрос. "
                                                 "Ответь только SQL в блоке ```sql```."}]
     else:
-        return {"answer": "Не получилось построить запрос к данным для этого вопроса. "
-                          "Попробуйте переформулировать его проще или конкретнее.",
-                "sql": None}
+        return _refuse("Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
+                       "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
+                       "разрезе нужен.")
 
+    trace.update(sql=sql, columns=result.columns, rows=result.rows)
+    state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
     shown_sql = f"-- t = данные таблицы «{table_name}» с приведёнными типами\n{sql}"
-    if not result.rows:
-        return {"answer": "По такому запросу в данных ничего не нашлось.", "sql": shown_sql}
+    if not result.rows or all(v is None for row in result.rows for v in row):
+        return {"answer": "По такому запросу в данных ничего не нашлось. Проверьте условия "
+                          "(период, значения фильтров).", "sql": shown_sql}
 
     say("Объясняю результат")
     data = result_text(result.columns, result.rows, result.truncated)
-    answer = client.chat([
+    answer = client_chat(client, [
         {"role": "system", "content": EXPLAIN_PROMPT},
-        {"role": "user", "content": f"Вопрос: {question}\n\nТаблица «{table_name}», "
+        {"role": "user", "content": f"Вопрос: {full_question}\n\nТаблица «{table_name}», "
                                     f"результат запроса:\n{data}"},
     ], max_tokens=400).strip()
     answer = re.sub(r"^(прямой\s+)?ответ\s*:\s*", "", answer, flags=re.IGNORECASE)
@@ -383,23 +589,16 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     return response
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Ответ на вопрос по данным")
-    parser.add_argument("question")
-    parser.add_argument("--catalog", type=Path, default=Path("data/schema-catalog.json"))
-    args = parser.parse_args()
-    try:
-        catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        print(f"Не удалось прочитать каталог: {exc}", file=sys.stderr)
-        return 1
+def client_chat(client, messages: list[dict], max_tokens: int = 600) -> str:
+    return client.chat(messages, max_tokens=max_tokens, temperature=0)
 
-    from .sql_runner import PostgresRunner
-    runner = PostgresRunner.from_env()
-    result = answer_question(args.question, catalog, runner,
-                             progress=lambda msg: print(f"... {msg}", file=sys.stderr))
+
+def _print_result(result: dict) -> None:
     print()
     print(result["answer"])
+    if result.get("clarification"):
+        for i, option in enumerate(result["clarification"]["options"], 1):
+            print(f"  {i}. {option}")
     if result.get("sql"):
         print("\nКак посчитано:\n" + result["sql"])
     if result.get("table"):
@@ -409,6 +608,39 @@ def main() -> int:
             print(" | ".join(row))
     if result.get("chart"):
         print(f"\nГрафик: {result['chart']['type']}, точек: {len(result['chart']['categories'])}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Ответ на вопрос по данным")
+    parser.add_argument("question", nargs="?", help="вопрос; без него — режим диалога")
+    parser.add_argument("--catalog", type=Path, default=Path("data/schema-catalog.json"))
+    args = parser.parse_args()
+    try:
+        catalog = json.loads(args.catalog.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"Не удалось прочитать каталог: {exc}", file=sys.stderr)
+        return 1
+
+    from .client import LLMClient
+    from .sql_runner import PostgresRunner
+    runner = PostgresRunner.from_env()
+    client = LLMClient()
+    progress = lambda msg: print(f"... {msg}", file=sys.stderr)  # noqa: E731
+
+    if args.question:
+        _print_result(answer_question(args.question, catalog, runner, client, progress))
+        return 0
+
+    print("Режим диалога: пишите вопросы, пустая строка — выход.")
+    while True:
+        try:
+            question = input("\n> ").strip()
+        except EOFError:
+            break
+        if not question:
+            break
+        _print_result(answer_question(question, catalog, runner, client, progress,
+                                      session_id="cli"))
     return 0
 
 

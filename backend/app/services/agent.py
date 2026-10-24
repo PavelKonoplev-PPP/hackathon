@@ -141,7 +141,7 @@ def process_chat_message(
                 raise AgentServiceError(f"Не удалось подключиться к базе данных под bi_reader: {exc}") from exc
 
         try:
-            return answer_question(message, catalog, runner)
+            return answer_question(message, catalog, runner, session_id=session_id)
         except Exception as exc:
             raise AgentServiceError(f"Ошибка при ответе на вопрос: {exc}") from exc
         finally:
@@ -183,3 +183,9 @@ def answer(question: str, session_id: str | None = None) -> str:
 def clear_session(session_id: str) -> None:
     """Clear memory for a given session."""
     _SESSION_HISTORY.pop(session_id, None)
+    if HAS_LLM_MODULE:
+        try:
+            from backend.llm.ask import reset_session
+        except ImportError:
+            from llm.ask import reset_session  # type: ignore
+        reset_session(session_id)
