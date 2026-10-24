@@ -66,8 +66,8 @@ def mentions(question: str, value: str, ignore: set[str] | None = None) -> bool:
     """Упомянуто ли значение категории в вопросе («через розницу» ~ «Розничный магазин»).
     ignore — слова, которые не считаются упоминанием (название таблицы: «строк продаж»
     не означает фильтр «Тип операции = 'Продажа'»), если значение не взято в кавычки."""
-    if value.lower() in quoted(question):
-        return True
+    if value.lower() in quoted(question) or value.lower() in question.lower():
+        return True  # значение названо дословно («VK Реклама», «Мобильное приложение»)
     value_words = words(value)
     if not value_words:  # короткие значения: «Да», «VK»
         return value.lower() in question.lower()
@@ -219,7 +219,7 @@ def _short_words(text: str) -> set[str]:
 
 
 def _check_group_by(sql: str, question: str, columns: list[str],
-                    ignore: set[str] | None) -> list[str]:
+                    ignore: set[str] | None, values: dict[str, list[str]] | None = None) -> list[str]:
     """GROUP BY только по тому, о чём спросили («в каждом статусе» — не по команде)."""
     m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
                   re.IGNORECASE | re.DOTALL)
@@ -227,8 +227,11 @@ def _check_group_by(sql: str, question: str, columns: list[str],
         return []
     clause = re.sub(r"(date_trunc|extract|date_part)\s*\([^)]*\)", " ", m.group(1), flags=re.IGNORECASE)
     asked = _asked_words(question, ignore)
+    values = values or {}
     extra = [c for c in re.findall(r'"([^"]+)"', clause)
-             if c in columns and not overlap(asked, _short_words(c))]
+             if c in columns and not overlap(asked, _short_words(c))
+             # «Сравни Яндекс Директ и VK Рекламу» — названы значения колонки «Площадка»
+             and not any(mentions(question, v, ignore) for v in values.get(c, []))]
     if not extra:
         return []
     return [f"Лишняя группировка по \"{extra[0]}\": этого нет в вопросе — убери её из "
@@ -307,7 +310,8 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
         problems.append("Запрос должен брать данные из таблицы t.")
 
     if columns:
-        problems += _check_group_by(sql, question, columns, ignore)
+        problems += _check_group_by(sql, question, columns, ignore, values)
+        problems += check_money(sql, question, columns)
         problems += _check_missing_filter(sql, question, values, columns, ignore, strict)
 
     value_owner = {v.lower(): col for col, vs in values.items() for v in vs}
@@ -373,3 +377,41 @@ def is_pure_view_request(text: str) -> bool:
         low = re.sub(pattern, " ", low)
     rest = [w for w in re.findall(r"[а-яёa-z0-9]+", low) if w not in _VIEW_FILLER]
     return not rest
+
+
+# ---------- выручка: количество × цена (× скидка) ----------
+
+MONEY = re.compile(r"выручк|оборот|доход|сумм\w*\s+продаж|продаж\w*\s+в\s+рубл", re.IGNORECASE)
+
+
+def money_parts(columns: list[str]) -> tuple[str, str, str | None] | None:
+    """Колонки количества, цены за единицу и скидки в процентах, если они есть в таблице."""
+    qty = next((c for c in columns if re.search(r"количеств", c, re.IGNORECASE)), None)
+    price = next((c for c in columns if re.search(r"цен", c, re.IGNORECASE)
+                  and re.search(r"единиц", c, re.IGNORECASE)), None)
+    disc = next((c for c in columns if re.search(r"скидк", c, re.IGNORECASE) and "%" in c), None)
+    return (qty, price, disc) if qty and price else None
+
+
+def money_formula(columns: list[str]) -> str | None:
+    parts = money_parts(columns)
+    if not parts:
+        return None
+    qty, price, disc = parts
+    inner = f'"{qty}" * "{price}"' + (f' * (1 - "{disc}" / 100.0)' if disc else "")
+    return f"SUM({inner})"
+
+
+def check_money(sql: str, question: str, columns: list[str]) -> list[str]:
+    """«Выручка» в таблице с ценой за единицу — обязательно количество × цена (× скидка)."""
+    parts = money_parts(columns)
+    if not parts or not MONEY.search(question):
+        return []
+    qty, price, disc = parts
+    formula = money_formula(columns)
+    if f'"{qty}"' not in sql or f'"{price}"' not in sql:
+        return [f"Выручка = {formula} — используй именно эту формулу."]
+    if disc and re.search(r"скидк", question, re.IGNORECASE) and not re.search(
+            r'1\s*-\s*"' + re.escape(disc) + r'"\s*/\s*100', sql):
+        return [f"С учётом скидки: {formula} — скидка делится на 100 внутри скобок."]
+    return []
