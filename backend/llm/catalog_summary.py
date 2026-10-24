@@ -36,11 +36,15 @@ def format_int(value: int | None) -> str:
 
 def table_row_count(table: dict) -> int | None:
     """Точное число строк из полного аудита, иначе оценка PostgreSQL."""
-    exact = [
-        col["conversion"]["quality"]["total_rows"]
-        for col in table.get("columns", [])
-        if (col.get("conversion") or {}).get("quality")
-    ]
+    exact = []
+    for col in table.get("columns") or []:
+        if not isinstance(col, dict):
+            continue
+        conv = col.get("conversion")
+        if isinstance(conv, dict):
+            quality = conv.get("quality")
+            if isinstance(quality, dict) and quality.get("total_rows") is not None:
+                exact.append(quality["total_rows"])
     if exact:
         return max(exact)
     estimate = table.get("estimated_total_rows")
@@ -79,12 +83,13 @@ def table_block(table: dict, max_columns: int = 40) -> str:
     """Описание одной таблицы: название, строки, колонки с типами."""
     columns = table.get("columns") or []
     lines = [
-        f"Таблица «{display_table_name(table['name'])}» "
-        f"(в базе: {table['name']}), строк: {format_int(table_row_count(table))}, "
+        f"Таблица «{display_table_name(table.get('name', ''))}» "
+        f"(в базе: {table.get('name', '')}), строк: {format_int(table_row_count(table))}, "
         f"колонок: {len(columns)}"
     ]
     for col in columns[:max_columns]:
-        lines.append(f"  - {col['name']}: {_column_note(col)}")
+        if isinstance(col, dict):
+            lines.append(f"  - {col.get('name', '')}: {_column_note(col)}")
     if len(columns) > max_columns:
         lines.append(f"  - ... и ещё {len(columns) - max_columns} колонок")
     return "\n".join(lines)
@@ -111,10 +116,12 @@ def overview_table(catalog: dict) -> dict:
     """Таблица для фронтенда (поле `table` в docs/api-contract.md)."""
     rows = []
     for table in catalog.get("tables") or []:
+        if not isinstance(table, dict):
+            continue
         columns = table.get("columns") or []
-        kinds = [c.get("inferred_type") for c in columns]
+        kinds = [c.get("inferred_type") for c in columns if isinstance(c, dict)]
         rows.append([
-            display_table_name(table["name"]),
+            display_table_name(table.get("name", "")),
             format_int(table_row_count(table)),
             str(len(columns)),
             str(sum(k in ("integer", "decimal") for k in kinds)),
@@ -164,26 +171,38 @@ def quality_section(catalog: dict, threshold: float = 0.01) -> str:
 
 
 def relationships_section(relationships: dict) -> str:
-    """Связи из relationship-catalog.json: внутри таблиц и между таблицами."""
-    joins = [j for j in relationships.get("join_candidates", [])
-             if j.get("technical_reference_verified")]
-    inner = [j for j in joins if j["source"]["table"] == j["target"]["table"]]
-    cross = [j for j in joins if j["source"]["table"] != j["target"]["table"]]
+    """Связи из каталога связей: внутри таблиц и между таблицами."""
+    raw_joins = (
+        relationships.get("join_candidates")
+        or relationships.get("relationships")
+        or []
+    )
+    if not isinstance(raw_joins, list):
+        raw_joins = []
+    joins = [
+        j for j in raw_joins
+        if isinstance(j, dict)
+        and (j.get("technical_reference_verified") or j.get("status") == "technical_reference_verified")
+        and isinstance(j.get("source"), dict)
+        and isinstance(j.get("target"), dict)
+    ]
+    inner = [j for j in joins if j["source"].get("table") == j["target"].get("table")]
+    cross = [j for j in joins if j["source"].get("table") != j["target"].get("table")]
     lines = []
     if inner:
         lines.append("Ссылки внутри одной таблицы (строка ссылается на другую строку):")
         for j in inner:
             src, dst = j["source"], j["target"]
-            lines.append(f"  - «{display_table_name(src['table'])}»: "
-                         f"{src['column']} -> {dst['column']}")
+            lines.append(f"  - «{display_table_name(src.get('table', ''))}»: "
+                         f"{src.get('column', '')} -> {dst.get('column', '')}")
         lines.append("")
     if cross:
         lines.append("Возможные связи между таблицами (технически совпадают коды, "
                      "бизнес-смысл не подтверждён):")
         for j in cross:
             src, dst = j["source"], j["target"]
-            lines.append(f"  - «{display_table_name(src['table'])}».{src['column']} -> "
-                         f"«{display_table_name(dst['table'])}».{dst['column']}")
+            lines.append(f"  - «{display_table_name(src.get('table', ''))}».{src.get('column', '')} -> "
+                         f"«{display_table_name(dst.get('table', ''))}».{dst.get('column', '')}")
     else:
         lines.append("Подтверждённых связей между разными таблицами не найдено: "
                      "таблицы стоит анализировать по отдельности.")

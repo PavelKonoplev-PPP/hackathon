@@ -7,7 +7,6 @@ Manual definitions live in a separate JSON file and survive regeneration.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -16,6 +15,11 @@ import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CATALOG = ROOT / "data/schema-catalog.json"
@@ -197,11 +201,13 @@ def _atomic_json(path: Path, obj: dict) -> None:
 def _lock(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     with (path.parent / ".business-glossary.lock").open("a+b") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def update_glossary(catalog_path: Path = DEFAULT_CATALOG,
