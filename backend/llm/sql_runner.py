@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Как в db/safe_cast.py: целевой тип PostgreSQL и регулярное выражение формата.
 CAST_TYPES = {
@@ -28,6 +28,19 @@ CAST_TYPES = {
 }
 RU_DATE_RE = r"^[0-9]{2}[.][0-9]{2}[.][0-9]{4}$"
 CASTABLE_POLICIES = {"safe_complete", "safe_with_nulls"}
+
+# Значения категорий меняются только при новой загрузке данных, а backend создаёт
+# новый runner на каждый запрос — поэтому кэш общий для процесса.
+_VALUES_CACHE: dict[tuple[str, str], dict[str, list[str]]] = {}
+
+
+_RANGE_CACHE: dict[tuple[str, str, str], tuple] = {}
+
+
+def clear_values_cache() -> None:
+    """Вызвать после загрузки/обновления данных."""
+    _VALUES_CACHE.clear()
+    _RANGE_CACHE.clear()
 
 
 def quote_ident(name: str) -> str:
@@ -95,7 +108,6 @@ class PostgresRunner:
     schema: str = "raw"
     max_rows: int = 200
     timeout_ms: int = 20000
-    _values_cache: dict = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> "PostgresRunner":
@@ -135,9 +147,9 @@ class PostgresRunner:
 
     def category_values(self, table: dict, max_values: int = 15) -> dict[str, list[str]]:
         """Значения категорий (их немного), чтобы модель писала верные фильтры WHERE."""
-        key = table["name"]
-        if key in self._values_cache:
-            return self._values_cache[key]
+        key = (self.schema, table["name"])
+        if key in _VALUES_CACHE:
+            return _VALUES_CACHE[key]
         values = {}
         source = f"{quote_ident(self.schema)}.{quote_ident(table['name'])}"
         for col in table.get("columns") or []:
@@ -152,5 +164,13 @@ class PostgresRunner:
             )
             if len(rows) <= max_values:
                 values[col["name"]] = sorted(str(r[0]) for r in rows)
-        self._values_cache[key] = values
+        _VALUES_CACHE[key] = values
         return values
+
+    def date_range(self, table: dict, column: str) -> tuple:
+        """(минимум, максимум) колонки с датой — для «сентябрь» без года и «прошлый месяц»."""
+        key = (self.schema, table["name"], column)
+        if key not in _RANGE_CACHE:
+            result = self.run(table, f'SELECT MIN({quote_ident(column)}), MAX({quote_ident(column)}) FROM t')
+            _RANGE_CACHE[key] = tuple(result.rows[0]) if result.rows else (None, None)
+        return _RANGE_CACHE[key]
