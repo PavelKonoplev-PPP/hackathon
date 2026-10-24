@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "description": "BI-06 deterministic SQL goldens on the untouched nine HK_Datasets CSV imports; question is only illustrative, not an LLM assertion",
+  "checks": [
+    {
+      "id": "rows_1",
+      "description": "Строки 01_Продажи",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Продажи?"
+    },
+    {
+      "id": "rows_2",
+      "description": "Строки 02_Техническая_поддержка",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_02_Техническая_поддержка\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Техническая поддержка?"
+    },
+    {
+      "id": "rows_3",
+      "description": "Строки 03_Задачи_команд",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_03_Задачи_команд\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Задачи команд?"
+    },
+    {
+      "id": "rows_4",
+      "description": "Строки 04_Доставка",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_04_Доставка\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Доставка?"
+    },
+    {
+      "id": "rows_5",
+      "description": "Строки 05_События_приложения",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_05_События_приложения\"",
+      "expected": 1000000,
+      "question": "Сколько всего записей в таблице События приложения?"
+    },
+    {
+      "id": "rows_6",
+      "description": "Строки 06_Рекламные_кампании",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_06_Рекламные_кампании\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Рекламные кампании?"
+    },
+    {
+      "id": "rows_7",
+      "description": "Строки 07_Заявки_на_закупку",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_07_Заявки_на_закупку\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Заявки на закупку?"
+    },
+    {
+      "id": "rows_8",
+      "description": "Строки 08_Фоновые_задания",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_08_Фоновые_задания\"",
+      "expected": 500000,
+      "question": "Сколько всего записей в таблице Фоновые задания?"
+    },
+    {
+      "id": "rows_9",
+      "description": "Строки 09_Лекарственные_препараты",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_09_Лекарственные_препараты\"",
+      "expected": 876000,
+      "question": "Сколько всего записей в таблице Лекарственные препараты?"
+    },
+    {
+      "id": "sales_operation_sale",
+      "description": "Операции Продажа",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Тип операции\" = 'Продажа'",
+      "expected": 494181,
+      "question": "Сколько операций с типом Продажа в таблице Продажи?"
+    },
+    {
+      "id": "sales_operation_return",
+      "description": "Операции Возврат",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Тип операции\" = 'Возврат'",
+      "expected": 5819,
+      "question": "Сколько операций с типом Возврат в таблице Продажи?"
+    },
+    {
+      "id": "sales_channel_mobile",
+      "description": "Продажи: мобильное приложение",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Моб. приложение'",
+      "expected": 214505,
+      "question": "Сколько строк продаж приходится на мобильное приложение?"
+    },
+    {
+      "id": "sales_channel_online",
+      "description": "Продажи: интернет-магазин",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Интернет-магазин'",
+      "expected": 185463,
+      "question": "Сколько строк продаж через интернет-магазин?"
+    },
+    {
+      "id": "sales_channel_retail",
+      "description": "Продажи: розница",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" = 'Розничный'",
+      "expected": 100032,
+      "question": "Сколько строк продаж через розничный канал?"
+    },
+    {
+      "id": "sales_operation_partition",
+      "description": "Разбиение продажи/возвраты",
+      "sql": "SELECT (COUNT(*) FILTER (WHERE \"Тип операции\" = 'Продажа') + COUNT(*) FILTER (WHERE \"Тип операции\" = 'Возврат') = COUNT(*)) FROM raw.\"data_01_Продажи\"",
+      "expected": true,
+      "question": null
+    },
+    {
+      "id": "sales_channel_partition",
+      "description": "Три канала покрывают все строки",
+      "sql": "SELECT (COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Моб. приложение') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Интернет-магазин') + COUNT(*) FILTER (WHERE \"Канал продажи\" = 'Розничный') = COUNT(*)) FROM raw.\"data_01_Продажи\"",
+      "expected": true,
+      "question": null
+    },
+    {
+      "id": "sales_operation_nonempty",
+      "description": "Нет пустого типа операции",
+      "sql": "SELECT COUNT(*) = 0 FROM raw.\"data_01_Продажи\" WHERE \"Тип операции\" IS NULL OR btrim(\"Тип операции\") = ''",
+      "expected": true,
+      "question": null
+    },
+    {
+      "id": "sales_channel_nonempty",
+      "description": "Нет пустого канала",
+      "sql": "SELECT COUNT(*) = 0 FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" IS NULL OR btrim(\"Канал продажи\") = ''",
+      "expected": true,
+      "question": null
+    },
+    {
+      "id": "sales_total_rows_sum",
+      "description": "Всего строк в девяти таблицах",
+      "sql": "SELECT (SELECT COUNT(*) FROM raw.\"data_01_Продажи\") + (SELECT COUNT(*) FROM raw.\"data_02_Техническая_поддержка\") + (SELECT COUNT(*) FROM raw.\"data_03_Задачи_команд\") + (SELECT COUNT(*) FROM raw.\"data_04_Доставка\") + (SELECT COUNT(*) FROM raw.\"data_05_События_приложения\") + (SELECT COUNT(*) FROM raw.\"data_06_Рекламные_кампании\") + (SELECT COUNT(*) FROM raw.\"data_07_Заявки_на_закупку\") + (SELECT COUNT(*) FROM raw.\"data_08_Фоновые_задания\") + (SELECT COUNT(*) FROM raw.\"data_09_Лекарственные_препараты\")",
+      "expected": 5376000,
+      "question": null
+    },
+    {
+      "id": "sales_count_case",
+      "description": "Возвраты через CASE",
+      "sql": "SELECT SUM(CASE WHEN \"Тип операции\" = 'Возврат' THEN 1 ELSE 0 END) FROM raw.\"data_01_Продажи\"",
+      "expected": 5819,
+      "question": null
+    },
+    {
+      "id": "sales_group_distinct",
+      "description": "Три канала продаж",
+      "sql": "SELECT COUNT(DISTINCT \"Канал продажи\") FROM raw.\"data_01_Продажи\"",
+      "expected": 3,
+      "question": null
+    },
+    {
+      "id": "sales_ops_distinct",
+      "description": "Два типа операций",
+      "sql": "SELECT COUNT(DISTINCT \"Тип операции\") FROM raw.\"data_01_Продажи\"",
+      "expected": 2,
+      "question": null
+    },
+    {
+      "id": "sales_mobile_or_online",
+      "description": "Мобильный + интернет",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" IN ('Моб. приложение','Интернет-магазин')",
+      "expected": 399968,
+      "question": null
+    },
+    {
+      "id": "sales_nonreturn",
+      "description": "Не возвраты",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Тип операции\" <> 'Возврат'",
+      "expected": 494181,
+      "question": null
+    },
+    {
+      "id": "sales_nonmobile",
+      "description": "Не мобильное приложение",
+      "sql": "SELECT COUNT(*) FROM raw.\"data_01_Продажи\" WHERE \"Канал продажи\" <> 'Моб. приложение'",
+      "expected": 285495,
+      "question": null
+    }
+  ]
+}
