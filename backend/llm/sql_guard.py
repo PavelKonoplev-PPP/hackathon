@@ -114,6 +114,24 @@ def fix_column_case(sql: str, columns: list[str]) -> str:
     return re.sub(r'"([^"]+)"', repl, sql)
 
 
+_QUOTED_OR_STRING = re.compile(r'("(?:[^"]|"")*"|\'(?:[^\']|\'\')*\')')
+
+
+def quote_bare_columns(sql: str, columns: list[str]) -> str:
+    """ID_Аптеки -> "ID_Аптеки": модель забывает кавычки у названий без пробелов,
+    а PostgreSQL без кавычек приводит их к нижнему регистру и не находит."""
+    simple = [c for c in columns if re.fullmatch(r"[\w]+", c)]
+    if not simple:
+        return sql
+    pattern = re.compile(r"(?<![\w.\"])(" + "|".join(map(re.escape, sorted(simple, key=len, reverse=True)))
+                         + r")(?![\w\"])", re.IGNORECASE)
+    by_lower = {c.lower(): c for c in simple}
+    parts = _QUOTED_OR_STRING.split(sql)
+    for i in range(0, len(parts), 2):  # чётные части — вне кавычек и строк
+        parts[i] = pattern.sub(lambda m: f'"{by_lower[m.group(1).lower()]}"', parts[i])
+    return "".join(parts)
+
+
 def validate_sql(sql: str, columns: list[str] | None = None,
                  table_alias: str = "t") -> str:
     """Проверяет запрос и возвращает его без завершающей ';'.
@@ -128,7 +146,7 @@ def validate_sql(sql: str, columns: list[str] | None = None,
         raise SQLRejected("Пустой запрос.")
 
     if columns:
-        sql = fix_column_case(sql, columns)
+        sql = fix_column_case(quote_bare_columns(sql, columns), columns)
     masked, identifiers = _mask(sql)
     if ";" in masked:
         raise SQLRejected("Разрешён только один запрос, без ';' внутри.")

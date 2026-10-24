@@ -5,8 +5,8 @@ import datetime as dt
 import unittest
 from decimal import Decimal
 
-from backend.llm.ask import (answer_looks_good, answer_question, format_value,
-                             missing_note, suggest_chart, template_answer, widen_top1)
+from backend.llm.ask import (_SESSIONS, answer_looks_good, answer_question, format_value,
+                             missing_note, suggest_chart, template_answer)
 from backend.llm.sql_guard import SQLRejected, extract_sql, validate_sql
 from backend.llm.sql_runner import QueryResult, build_query, cast_sql
 
@@ -108,11 +108,6 @@ class AnswerQualityTests(unittest.TestCase):
         self.assertEqual(missing_note('SELECT "Канал" FROM t', table), "")
         self.assertEqual(template_answer(["Количество"], [(42,)], False), "Количество: 42.")
 
-    def test_widen_top1(self):
-        self.assertTrue(widen_top1("SELECT a, SUM(b) FROM t GROUP BY a ORDER BY 2 DESC LIMIT 1")
-                        .endswith("LIMIT 10"))
-        self.assertTrue(widen_top1("SELECT a FROM t ORDER BY a LIMIT 1").endswith("LIMIT 1"))
-
 
 class FormatTests(unittest.TestCase):
     def test_values(self):
@@ -123,25 +118,69 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_value(None), "—")
 
     def test_chart(self):
-        bar = suggest_chart(["Канал", "Выручка"], [("Онлайн", Decimal(10)), ("Магазин", Decimal(5))])
+        bar, _ = suggest_chart(["Канал", "Выручка"], [("Онлайн", Decimal(10)), ("Магазин", Decimal(5))])
         self.assertEqual(bar["type"], "bar")
         self.assertEqual(bar["series"][0]["data"], [10.0, 5.0])
-        line = suggest_chart(["Месяц", "N"], [(dt.datetime(2025, 2, 1), 2), (dt.datetime(2025, 1, 1), 1)])
+        line, _ = suggest_chart(["Месяц", "N"], [(dt.datetime(2025, 2, 1), 2), (dt.datetime(2025, 1, 1), 1)])
         self.assertEqual(line["type"], "line")
         self.assertEqual(line["categories"], ["01.01.2025", "01.02.2025"])
-        self.assertIsNone(suggest_chart(["Канал"], [("a",), ("b",)]))
+        self.assertIsNone(suggest_chart(["Канал"], [("a",), ("b",)])[0])
+
+    def test_pivot_chart_and_template(self):
+        rows = [("Онлайн", dt.date(2025, 1, 1), Decimal(10)), ("Онлайн", dt.date(2025, 2, 1), Decimal(12)),
+                ("Магазин", dt.date(2025, 1, 1), Decimal(5)), ("Магазин", dt.date(2025, 2, 1), Decimal(30))]
+        cols = ["Канал", "Месяц", "Выручка"]
+        chart, note = suggest_chart(cols, rows)
+        self.assertEqual(chart["type"], "line")
+        self.assertEqual(chart["categories"], ["01.01.2025", "01.02.2025"])
+        self.assertEqual([s["name"] for s in chart["series"]], ["Онлайн", "Магазин"])
+        self.assertEqual(chart["series"][1]["data"], [5.0, 30.0])
+        text = template_answer(cols, rows, False)
+        self.assertIn("Максимум — «Магазин», 01.02.2025: 30", text)
+        self.assertIn("Больше всего в сумме — у «Магазин»: 35", text)
+        self.assertEqual(suggest_chart(cols, rows, "pie")[0]["type"], "line")
+
+    def test_chart_views(self):
+        rows = [("Онлайн", 10), ("Магазин", 5)]
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, "pie")[0]["type"], "pie")
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, "line")[0]["type"], "line")
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, question="Доля каналов в продажах")[0]["type"], "pie")
+        self.assertIsNone(suggest_chart(["Канал", "N"], rows, "table")[0])
+        many = [(f"Город {i}", i) for i in range(20)]
+        chart, note = suggest_chart(["Город", "N"], many, "pie")
+        self.assertEqual(chart["type"], "bar")
+        self.assertIn("Круговая диаграмма подходит", note)
 
 
 CATALOG = {"tables": [
     {"name": "data_01_Продажи", "columns": [
+        {"name": "Код позиции", "inferred_type": "identifier", "sample_rows": 300,
+         "sample_distinct": 300, "conversion": {}},
+        {"name": "Код заказа", "inferred_type": "identifier", "sample_rows": 300,
+         "sample_distinct": 280, "conversion": {}},
         {"name": "Канал продажи", "inferred_type": "category", "sample_distinct": 3,
+         "conversion": {"policy": "not_applicable"}},
+        {"name": "Тип операции", "inferred_type": "category", "sample_distinct": 2,
          "conversion": {"policy": "not_applicable"}},
         {"name": "Цена, руб.", "inferred_type": "decimal",
          "conversion": {"target_type": "decimal", "policy": "safe_complete"}},
+        {"name": "Дата", "inferred_type": "date",
+         "conversion": {"target_type": "date", "policy": "safe_complete"}},
+        {"name": "Город", "inferred_type": "category", "sample_distinct": 30, "conversion": {}},
     ]},
     {"name": "data_02_Доставка", "columns": [
-        {"name": "Перевозчик", "inferred_type": "category", "conversion": {}}]},
+        {"name": "Перевозчик", "inferred_type": "category", "sample_distinct": 2, "conversion": {}},
+        {"name": "Город", "inferred_type": "category", "sample_distinct": 30, "conversion": {}},
+        {"name": "Причина отмены или возврата", "inferred_type": "category",
+         "sample_distinct": 2, "conversion": {}}]},
 ]}
+
+VALUES = {
+    "data_01_Продажи": {"Канал продажи": ["Интернет-магазин", "Мобильное приложение"],
+                        "Тип операции": ["Возврат", "Продажа"]},
+    "data_02_Доставка": {"Перевозчик": ["Почта", "Курьер"],
+                         "Причина отмены или возврата": ["Отказ получателя", "Повреждение"]},
+}
 
 
 class ScriptedClient:
@@ -157,87 +196,226 @@ class ScriptedClient:
 
 
 class FakeRunner:
-    def __init__(self, fail_first=False):
+    def __init__(self, fail_first=False, rows=None, columns=None):
         self.fail_first = fail_first
         self.sqls = []
+        self.rows = rows or [("Мобильное приложение", Decimal("1500000.5")),
+                             ("Интернет-магазин", Decimal("900000"))]
+        self.columns = columns or ["Канал продажи", "Выручка"]
 
     def category_values(self, table):
-        return {"Канал продажи": ["Магазин", "Онлайн"]}
+        return VALUES.get(table["name"], {})
 
     def run(self, table, sql):
         self.sqls.append(sql)
         if self.fail_first and len(self.sqls) == 1:
             raise RuntimeError("function sum(text) does not exist\nHINT: ...")
-        return QueryResult(["Канал продажи", "Выручка"],
-                           [("Онлайн", Decimal("1500000.5")), ("Магазин", Decimal("900000"))])
+        return QueryResult(self.columns, self.rows)
 
 
 GOOD_SQL = ('```sql\nSELECT "Канал продажи", SUM("Цена, руб.") AS "Выручка" FROM t '
             'GROUP BY 1 ORDER BY 2 DESC\n```')
+GOOD_TEXT = "Больше всего выручки у мобильного приложения: 1 500 000,50 руб."
+
+
+def ask(question, replies, runner=None, session=None):
+    client = ScriptedClient(replies)
+    trace = {}
+    result = answer_question(question, CATALOG, runner or FakeRunner(), client=client,
+                             trace=trace, session_id=session)
+    return result, client, trace
 
 
 class AnswerTests(unittest.TestCase):
-    def test_full_flow(self):
-        good = "Больше всего выручки у онлайн-канала: 1 500 000,50 руб."
-        client = ScriptedClient(["1", GOOD_SQL, good])
-        result = answer_question("Какой канал лучше?", CATALOG, FakeRunner(), client=client)
-        self.assertEqual(result["answer"], good)
-        self.assertEqual(result["table"]["rows"][0], ["Онлайн", "1 500 000,50"])
-        self.assertEqual(result["chart"]["type"], "bar")
-        self.assertIn("FROM t", result["sql"])
-        sql_prompt = client.calls[1][0]["content"]
-        self.assertIn("'Магазин', 'Онлайн'", sql_prompt)
-        self.assertIn('"Цена, руб." — число', sql_prompt)
-        self.assertIn("1 500 000,50", client.calls[2][1]["content"])
+    def setUp(self):
+        _SESSIONS.clear()
 
-    def test_hint_and_answer_prefix(self):
-        client = ScriptedClient(["1", GOOD_SQL,
-                                 "Прямой ответ: лучше всего продаёт онлайн-канал, выручка 1 500 000,50 руб."])
-        result = answer_question("Какой канал продаж лучше?", CATALOG, FakeRunner(), client=client)
-        self.assertIn('речь о колонках "Канал продажи"', client.calls[1][0]["content"])
-        self.assertEqual(result["answer"],
-                         "лучше всего продаёт онлайн-канал, выручка 1 500 000,50 руб.")
+    def test_full_flow(self):
+        result, client, trace = ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT])
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertEqual(result["answer"], GOOD_TEXT)
+        self.assertEqual(result["table"]["rows"][0], ["Мобильное приложение", "1 500 000,50"])
+        self.assertEqual(result["chart"]["type"], "bar")
+        sql_prompt = client.calls[0][0]["content"]
+        self.assertIn("'Интернет-магазин', 'Мобильное приложение'", sql_prompt)
+        self.assertIn('"Цена, руб." — число', sql_prompt)
+        self.assertIn('речь о колонках "Канал продажи"', sql_prompt)
+
+    def test_table_chosen_by_category_value(self):
+        # «возврат» есть и в колонке доставки, но «операций» + значение 'Возврат' — продажи
+        result, client, trace = ask(
+            "Сколько было операций возврата?",
+            ['```sql\nSELECT COUNT(*) FROM t WHERE "Тип операции" = \'Возврат\'\n```', "x"],
+            FakeRunner(rows=[(5819,)], columns=["Количество"]))
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertEqual(result["answer"], "Количество: 5 819.")
 
     def test_repairs_after_bad_column_and_db_error(self):
-        client = ScriptedClient([
-            "1",
+        runner = FakeRunner(fail_first=True)
+        result, client, trace = ask("Какая выручка по каналам продаж?", [
             '```sql\nSELECT "Выручка" FROM t\n```',   # несуществующая колонка
             GOOD_SQL,                                 # база вернёт ошибку
             GOOD_SQL,
             "Ответ.",
-        ])
-        runner = FakeRunner(fail_first=True)
-        result = answer_question("Вопрос", CATALOG, runner, client=client)
-        self.assertTrue(result["answer"].startswith("Наибольшее значение"))  # «Ответ.» -> шаблон
+        ], runner)
         self.assertEqual(len(runner.sqls), 2)
-        self.assertEqual(client.calls[2][1]["content"], "Вопрос: Вопрос")
-        self.assertIn('Колонки "Выручка" нет', client.calls[2][-1]["content"])
-        repair = client.calls[3][-1]["content"]
-        self.assertIn("Ошибка PostgreSQL: function sum(text) does not exist", repair)
-        self.assertNotIn("HINT", repair)
+        self.assertIn('Колонки "Выручка" нет', client.calls[0][-1]["content"]
+                      if len(client.calls[0]) > 2 else client.calls[1][-1]["content"])
+        self.assertIn("Ошибка PostgreSQL: function sum(text) does not exist", client.calls[2][-1]["content"])
+        self.assertNotIn("HINT", client.calls[2][-1]["content"])
+        self.assertTrue(result["answer"].startswith("Наибольшее значение"))  # «Ответ.» -> шаблон
+        self.assertEqual(trace["attempts"], 3)
 
-    def test_gives_up_after_three_attempts(self):
-        client = ScriptedClient(["1", "DELETE FROM t", "DELETE FROM t", "DELETE FROM t"])
-        result = answer_question("Удали всё", CATALOG, FakeRunner(), client=client)
-        self.assertIn("Не получилось", result["answer"])
+    def test_count_question_rejects_row_listing(self):
+        _, client, trace = ask("Сколько строк продаж через мобильное приложение?", [
+            '```sql\nSELECT * FROM t WHERE "Канал продажи" = \'Мобильное приложение\' LIMIT 10\n```',
+            '```sql\nSELECT COUNT(*) FROM t WHERE "Канал продажи" = \'Мобильное приложение\'\n```',
+            "x"], FakeRunner(rows=[(214505,)], columns=["Количество"]))
+        self.assertIn("нужен COUNT", trace["errors"][0])
+        self.assertEqual(trace["attempts"], 2)
 
-    def test_keywords_rescue_bad_pick(self):
-        client = ScriptedClient(["0", GOOD_SQL, "Ответ."])
+    def test_invented_filter_removed(self):
         runner = FakeRunner()
-        answer_question("Какой канал продаж лучше?", CATALOG, runner, client=client)
-        self.assertEqual(len(runner.sqls), 1)
-        self.assertIn('"Канал продажи"', client.calls[1][0]["content"])
+        _, client, trace = ask("Какая выручка по каналам продаж?", [
+            '```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t '
+            'WHERE "Канал продажи" IN (\'Интернет-магазин\') AND "Тип операции" = \'Продажа\' '
+            'GROUP BY 1\n```', GOOD_TEXT], runner)
+        self.assertEqual(trace["errors"], [])
+        self.assertEqual(len(trace["removed_filters"]), 2)
+        self.assertNotIn("WHERE", runner.sqls[0])
 
-    def test_keywords_override_model_miss(self):
-        client = ScriptedClient(["2", GOOD_SQL, "Ответ."])
-        answer_question("Выручка по каналам продаж", CATALOG, FakeRunner(), client=client)
-        self.assertIn('"Канал продажи"', client.calls[1][0]["content"])
+    def test_quoted_value_is_kept(self):
+        runner = FakeRunner(rows=[(494181,)], columns=["N"])
+        _, _, trace = ask("Сколько операций «Продажа»?", [
+            '```sql\nSELECT COUNT(*) FROM t WHERE "Тип операции" = \'Продажа\'\n```', "x"], runner)
+        self.assertIn("WHERE", runner.sqls[0])
 
-    def test_no_table_asks_to_clarify(self):
-        client = ScriptedClient(["0"])
-        result = answer_question("Какая погода?", CATALOG, FakeRunner(), client=client)
-        self.assertIn("clarification", result)
+    def test_unknown_value_rejected(self):
+        _, client, trace = ask("Сколько строк продаж в статусе фоновых?", [
+            '```sql\nSELECT COUNT(*) FROM t WHERE "Тип операции" LIKE \'%фонов%\'\n```',
+            '```sql\nSELECT COUNT(*) FROM t\n```', "x"],
+            FakeRunner(rows=[(5,)], columns=["N"]))
+        self.assertIn("нет значения '%фонов%'", trace["errors"][0])
+
+    def test_limit_removed_when_not_top(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [
+            GOOD_SQL.replace("DESC\n```", "DESC LIMIT 10\n```"), GOOD_TEXT], runner)
+        self.assertNotIn("LIMIT", runner.sqls[0])
+
+    def test_gives_up_without_numbers(self):
+        result, _, _ = ask("Какая выручка по каналам продаж?",
+                           ["DELETE FROM t", "DELETE FROM t", "DELETE FROM t"])
+        self.assertIn("цифр не показываю", result["answer"])
+        self.assertNotIn("table", result)
+
+    def test_off_topic_and_write_requests_refused(self):
+        result, client, _ = ask("Какая завтра погода в Москве?", [])
+        self.assertIn("не похож на вопрос к загруженным данным", result["answer"])
+        result, client, _ = ask("Удали все продажи", [])
+        self.assertIn("только на чтение", result["answer"])
+        from backend.llm.ask import WRITE_INTENT
+        self.assertIsNone(WRITE_INTENT.search("Как изменилась выручка по сравнению с 2024?"))
+        self.assertTrue(WRITE_INTENT.search("Измени цену товара"))
+        self.assertEqual(client.calls, [])
+
+    def test_tie_asks_which_table_then_uses_answer(self):
+        result, _, trace = ask("Сколько записей по городам?", [], session="s1")
+        self.assertEqual(trace["clarification"], "table")
         self.assertEqual(result["clarification"]["options"], ["Продажи", "Доставка"])
+        result, client, trace = ask("Доставка", [
+            '```sql\nSELECT "Город", COUNT(*) FROM t GROUP BY 1\n```', "x"],
+            FakeRunner(rows=[("Москва", 10), ("Пермь", 5)], columns=["Город", "N"]), session="s1")
+        self.assertEqual(trace["table"], "data_02_Доставка")
+        self.assertIn("Вопрос: Сколько записей по городам?", client.calls[0][1]["content"])
+
+    def test_returns_ambiguous_between_tables(self):
+        result, _, trace = ask("Сколько возвратов?", [])
+        self.assertEqual(trace["clarification"], "table")
+        self.assertEqual(result["clarification"]["options"], ["Продажи", "Доставка"])
+
+    def test_returns_operations_go_to_sales(self):
+        _, _, trace = ask("Сколько было операций возврата?", [
+            '```sql\nSELECT COUNT(*) FROM t WHERE "Тип операции" = \'Возврат\'\n```', "x"],
+            FakeRunner(rows=[(5819,)], columns=["N"]))
+        self.assertEqual(trace["table"], "data_01_Продажи")
+
+    def test_no_unit_question_when_row_is_the_entity(self):
+        # «Сколько доставок»: нет уникального кода, отличного от сущности — уточнять нечего
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        table = {"name": "data_05_События", "columns": [
+            {"name": "Код события", "inferred_type": "identifier", "sample_rows": 300, "sample_distinct": 300},
+            {"name": "Код сессии", "inferred_type": "identifier", "sample_rows": 300, "sample_distinct": 245}]}
+        q = "Сколько событий на каждой платформе?"
+        self.assertEqual(unit_options(q, Intent.parse(q), table), [])
+
+    def test_unit_clarification(self):
+        result, _, trace = ask("Сколько продаж через интернет-магазин?", [], session="s2")
+        self.assertEqual(trace["clarification"], "unit")
+        self.assertEqual(result["clarification"]["options"],
+                         ["Количество строк (записей)", "Количество уникальных: Код заказа"])
+        _, client, trace = ask("Количество уникальных: Код заказа", [
+            '```sql\nSELECT COUNT(DISTINCT "Код заказа") FROM t WHERE "Канал продажи" = '
+            '\'Интернет-магазин\'\n```', "x"],
+            FakeRunner(rows=[(60138,)], columns=["N"]), session="s2")
+        self.assertIn("уникальных «Код заказа»", client.calls[0][1]["content"])
+        self.assertEqual(trace["errors"], [])
+
+    def test_followup_keeps_previous_query(self):
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], session="s3")
+        _, client, trace = ask("А теперь только мобильное приложение", [
+            '```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t WHERE "Канал продажи" = '
+            '\'Мобильное приложение\' GROUP BY 1\n```', GOOD_TEXT], session="s3")
+        messages = client.calls[0]
+        self.assertEqual(messages[1]["content"], "Вопрос: Какая выручка по каналам продаж?")
+        self.assertIn('SUM("Цена, руб.")', messages[2]["content"])
+        self.assertIn("Уточнение к предыдущему вопросу: А теперь только мобильное", messages[3]["content"])
+        self.assertEqual(trace["errors"], [])
+
+    def test_pure_view_switch_reuses_last_sql_without_model(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="v1")
+        result, client, trace = ask("Покажи то же самое кругом", [], runner, session="v1")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result["chart"]["type"], "pie")
+        self.assertEqual(result["answer"], "Вот тот же результат круговой диаграммой.")
+        self.assertEqual(runner.sqls[0], runner.sqls[1])
+
+    def test_view_without_history(self):
+        result, client, _ = ask("Покажи кругом", [], session="v2")
+        self.assertIn("Сначала задайте вопрос", result["answer"])
+
+    def test_followup_with_new_condition_and_view(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="v3")
+        month_sql = ('```sql\nSELECT date_trunc(\'month\', "Дата") AS "Месяц", SUM("Цена, руб.") '
+                     'FROM t GROUP BY 1 ORDER BY 1\n```')
+        runner.rows = [(dt.datetime(2025, 1, 1), Decimal(5)), (dt.datetime(2025, 2, 1), Decimal(7))]
+        runner.columns = ["Месяц", "Выручка"]
+        result, client, trace = ask("По месяцам столбцами", [month_sql, "x"], runner, session="v3")
+        self.assertIn("Уточнение к предыдущему вопросу: По месяцам столбцами", client.calls[0][3]["content"])
+        self.assertEqual(result["chart"]["type"], "bar")  # просили столбцы, хотя это время
+
+    def test_short_refinement_vs_new_question(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="r1")
+        filtered = ('```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t WHERE "Канал продажи" = '
+                    '\'Мобильное приложение\' GROUP BY 1\n```')
+        _, client, trace = ask("Только мобильное приложение", [filtered, GOOD_TEXT], runner, session="r1")
+        self.assertEqual(trace["errors"], [])
+        self.assertIn("Уточнение к предыдущему вопросу", client.calls[0][3]["content"])
+        # после вопроса о доставке короткий вопрос о продажах — новый вопрос, а не продолжение
+        ask("Сколько записей по перевозчикам?", ['```sql\nSELECT "Перевозчик", COUNT(*) FROM t GROUP BY 1\n```',
+                                                "x"], runner, session="r2")
+        _, client, trace = ask("Выручка по каналам продаж", [GOOD_SQL, GOOD_TEXT], runner, session="r2")
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertEqual(client.calls[0][1]["content"], "Вопрос: Выручка по каналам продаж")
+
+    def test_no_session_no_memory(self):
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT])
+        result, _, _ = ask("А теперь только мобильное приложение", [GOOD_SQL, GOOD_TEXT])
+        self.assertNotIn("clarification", result)
 
 
 if __name__ == "__main__":
