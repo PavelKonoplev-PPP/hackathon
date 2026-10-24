@@ -28,8 +28,9 @@ from pathlib import Path
 from collections import OrderedDict
 
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int
-from .semantics import (Intent, adjust_sql, check_sql, counted_noun, overlap, same_word,
-                        strip_unmentioned_filters, strong_word, words)
+from .semantics import (Intent, adjust_sql, check_sql, counted_noun, is_pure_view_request,
+                        overlap, requested_view, same_word, strip_unmentioned_filters,
+                        strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
 
@@ -276,19 +277,53 @@ def _is_number(value) -> bool:
     return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
 
 
-def suggest_chart(columns: list[str], rows: list[tuple]) -> dict | None:
-    """Простой график: первая колонка — подписи, остальные числовые — серии."""
+VIEW_NAMES = {"bar": "столбчатой диаграммой", "line": "линейным графиком",
+              "pie": "круговой диаграммой", "table": "таблицей"}
+SHARE_WORDS = re.compile(r"доля|долю|доли|структур|соотношен|распределен|процент", re.IGNORECASE)
+PIE_MAX = 12
+
+
+def suggest_chart(columns: list[str], rows: list[tuple], preferred: str | None = None,
+                  question: str = "") -> tuple[dict | None, str]:
+    """График по результату: первая колонка — подписи, остальные числовые — серии.
+
+    preferred — вид, о котором попросил пользователь (bar / line / pie / table).
+    Без просьбы: время — линия, «доля/структура» при немногих частях — круг, иначе столбцы.
+    Возвращает (график или None, пояснение, если просьбу выполнить нельзя)."""
+    if preferred == "table":
+        return None, ""
+    pivot = _pivot(columns, rows)
+    if pivot:
+        return _pivot_chart(pivot, preferred)
     if len(columns) < 2 or not 2 <= len(rows) <= 50:
-        return None
+        return None, ("Для графика нужно от 2 до 50 значений — показываю таблицей."
+                      if preferred else "")
     numeric = [i for i in range(1, len(columns))
                if all(_is_number(r[i]) or r[i] is None for r in rows)]
     if not numeric or len(numeric) != len(columns) - 1:
-        return None
+        return None, ("Этот результат нельзя нарисовать графиком — показываю таблицей."
+                      if preferred else "")
     is_time = all(isinstance(r[0], (dt.date, dt.datetime)) for r in rows)
     if is_time:
         rows = sorted(rows, key=lambda r: r[0])
-    return {
-        "type": "line" if is_time else "bar",
+    pie_ok = (len(numeric) == 1 and len(rows) <= PIE_MAX
+              and all(r[numeric[0]] is None or r[numeric[0]] >= 0 for r in rows))
+
+    note = ""
+    if preferred == "pie" and not pie_ok:
+        kind, note = ("line" if is_time else "bar"), (
+            f"Круговая диаграмма подходит для одной величины и не более {PIE_MAX} частей — "
+            f"показываю {VIEW_NAMES['line' if is_time else 'bar']}.")
+    elif preferred in ("bar", "line", "pie"):
+        kind = preferred
+    elif is_time:
+        kind = "line"
+    elif pie_ok and len(rows) <= 8 and SHARE_WORDS.search(question):
+        kind = "pie"
+    else:
+        kind = "bar"
+    chart = {
+        "type": kind,
         "title": columns[numeric[0]] if len(numeric) == 1 else "",
         "x_label": columns[0],
         "y_label": columns[numeric[0]] if len(numeric) == 1 else "",
@@ -297,6 +332,56 @@ def suggest_chart(columns: list[str], rows: list[tuple]) -> dict | None:
                     "data": [float(r[i]) if r[i] is not None else None for r in rows]}
                    for i in numeric],
     }
+    return chart, note
+
+
+def _pivot(columns: list[str], rows: list[tuple]) -> dict | None:
+    """Три колонки «разрез × разрез → число» (канал, месяц, выручка) — для графика
+    с несколькими сериями: по оси X — время или второй разрез, серия на каждое значение."""
+    if len(columns) != 3 or not rows:
+        return None
+    kinds = []
+    for i in range(3):
+        col = [r[i] for r in rows if r[i] is not None]
+        if col and all(isinstance(v, (dt.date, dt.datetime)) for v in col):
+            kinds.append("time")
+        elif col and all(_is_number(v) for v in col):
+            kinds.append("number")
+        else:
+            kinds.append("label")
+    if kinds.count("number") != 1 or "label" not in kinds:
+        return None
+    value = kinds.index("number")
+    series_i = kinds.index("label")
+    axis_i = next(i for i in range(3) if i not in (value, series_i))
+    is_time = kinds[axis_i] == "time"
+    axis = sorted({r[axis_i] for r in rows if r[axis_i] is not None}, key=lambda v: (str(type(v)), v))
+    names = list(dict.fromkeys(r[series_i] for r in rows if r[series_i] is not None))
+    if not 2 <= len(axis) <= 60 or not 2 <= len(names) <= 8:
+        return None
+    cells = {(r[series_i], r[axis_i]): r[value] for r in rows}
+    return {"metric": columns[value], "axis_label": columns[axis_i], "series_label": columns[series_i],
+            "is_time": is_time, "axis": axis, "names": names, "cells": cells}
+
+
+def _pivot_chart(p: dict, preferred: str | None) -> tuple[dict, str]:
+    note = ""
+    kind = preferred if preferred in ("bar", "line") else ("line" if p["is_time"] else "bar")
+    if preferred == "pie":
+        note = (f"Круговая диаграмма подходит для одной величины без разбивки — показываю "
+                f"{VIEW_NAMES[kind]}.")
+    chart = {
+        "type": kind,
+        "title": f"{p['metric']} по «{p['series_label']}»",
+        "x_label": p["axis_label"],
+        "y_label": p["metric"],
+        "categories": [format_value(a) for a in p["axis"]],
+        "series": [{"name": str(name),
+                    "data": [float(p["cells"][(name, a)]) if p["cells"].get((name, a)) is not None
+                             else None for a in p["axis"]]}
+                   for name in p["names"]],
+    }
+    return chart, note
 
 
 def result_text(columns: list[str], rows: list[tuple], truncated: bool) -> str:
@@ -345,6 +430,19 @@ def missing_note(sql: str, table: dict, threshold: float = 0.05) -> str:
 
 def template_answer(columns: list[str], rows: list[tuple], truncated: bool) -> str:
     """Запасной ответ кодом — скучный, но всегда верный."""
+    p = _pivot(columns, rows)
+    if p:
+        totals = {n: sum(float(p["cells"].get((n, a)) or 0) for a in p["axis"]) for n in p["names"]}
+        best = max(totals, key=totals.get)
+        peak = max(((n, a) for n in p["names"] for a in p["axis"] if p["cells"].get((n, a)) is not None),
+                   key=lambda k: p["cells"][k])
+        span = (f" с {format_value(p['axis'][0])} по {format_value(p['axis'][-1])}"
+                if p["is_time"] else "")
+        text = (f"«{p['metric']}»{span} по {len(p['names'])} значениям «{p['series_label']}». "
+                f"Максимум — «{peak[0]}», {format_value(peak[1])}: {format_value(p['cells'][peak])}.")
+        if is_additive(p["metric"]):
+            text += f" Больше всего в сумме — у «{best}»: {format_value(totals[best])}."
+        return text + " Подробности — на графике."
     if len(rows) == 1 and len(columns) == 1:
         return f"{columns[0]}: {format_value(rows[0][0])}."
     if len(rows) == 1:
@@ -406,7 +504,19 @@ def _match_option(message: str, options: list[str]) -> int | None:
 
 
 def is_followup(question: str) -> bool:
-    return bool(FOLLOWUP_START.search(question) or FOLLOWUP_WORDS.search(question))
+    """Явное продолжение: «а теперь…», «то же самое…», просьба о виде («по месяцам линией»)."""
+    return bool(FOLLOWUP_START.search(question) or FOLLOWUP_WORDS.search(question)
+                or requested_view(question))
+
+
+def is_short_refinement(question: str, tables: list[dict]) -> bool:
+    """Короткое уточнение без названия таблицы и без «сколько»: «только Москва», «за 2025 год».
+    Окончательно решает выбор таблицы: если вопрос уверенно про другую таблицу — это новый вопрос."""
+    asked = words(question)
+    if not asked or len(asked) > 3 or Intent.parse(question).is_count:
+        return False
+    names = set().union(*(words(display_table_name(t["name"])) for t in tables))
+    return not overlap(asked, names)
 
 
 def _values_for_all(runner, tables: list[dict]) -> dict:
@@ -467,21 +577,44 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         return _refuse("Я работаю с данными только на чтение: могу считать и показывать, "
                        "но не изменять и не удалять данные.")
 
-    # 1. Продолжение прошлого вопроса?
-    previous = None
+    # 1. Только сменить вид прошлого результата («покажи кругом») — без модели
     last = state.get("last")
-    if not forced_table and last and is_followup(question) and last["table"] in by_name:
-        previous = last
-        forced_table = by_name[last["table"]]
-        say(f"Продолжение вопроса: «{last['question']}»")
+    if is_pure_view_request(question):
+        if not last or last["table"] not in by_name:
+            return _refuse("Сначала задайте вопрос к данным — потом я покажу результат "
+                           "в нужном виде.")
+        view = requested_view(question)
+        say(f"Меняю вид прошлого результата: {view}")
+        result = runner.run(by_name[last["table"]], last["sql"])
+        trace.update(table=last["table"], sql=last["sql"], columns=result.columns, rows=result.rows,
+                     view=view)
+        response = _result_response(result, last["sql"], by_name[last["table"]], view,
+                                    last["question"])
+        response["answer"] = (f"Вот тот же результат {VIEW_NAMES[view]}." + (
+            " " + response.pop("_note") if response.get("_note") else ""))
+        response.pop("_note", None)
+        return response
 
-    # 2. Таблица
+    # 2. Продолжение прошлого вопроса?
+    previous = None
     values_by_table = None
+    if not forced_table and last and last["table"] in by_name:
+        followup = is_followup(question)
+        if not followup and is_short_refinement(question, tables):
+            values_by_table = _values_for_all(runner, tables)
+            guess, _ = choose_table(question, tables, values_by_table)
+            followup = guess is None or guess["name"] == last["table"]
+        if followup:
+            previous = last
+            forced_table = by_name[last["table"]]
+            say(f"Продолжение вопроса: «{last['question']}»")
+
+    # 3. Таблица
     if forced_table is not None:
         table = forced_table
     else:
         say("Выбираю таблицу")
-        values_by_table = _values_for_all(runner, tables)
+        values_by_table = values_by_table or _values_for_all(runner, tables)
         table, candidates = choose_table(question, tables, values_by_table)
         if table is None:
             if not candidates:
@@ -577,15 +710,24 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if note:
         answer = f"{answer} {note}"
 
+    response = _result_response(result, sql, table, requested_view(question), full_question)
+    note = response.pop("_note", "")
+    response["answer"] = f"{answer} {note}".strip()
+    return response
+
+
+def _result_response(result, sql: str, table: dict, view: str | None, question: str) -> dict:
+    """Таблица, SQL и график в формате api-contract; _note — пояснение про вид графика."""
+    table_name = display_table_name(table["name"])
     response = {
-        "answer": answer,
         "table": {"columns": result.columns,
                   "rows": [[format_value(v) for v in row] for row in result.rows]},
-        "sql": shown_sql,
+        "sql": f"-- t = данные таблицы «{table_name}» с приведёнными типами\n{sql}",
     }
-    chart = suggest_chart(result.columns, result.rows)
+    chart, note = suggest_chart(result.columns, result.rows, view, question)
     if chart:
         response["chart"] = chart
+    response["_note"] = note
     return response
 
 

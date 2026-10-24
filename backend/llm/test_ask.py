@@ -118,13 +118,38 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_value(None), "—")
 
     def test_chart(self):
-        bar = suggest_chart(["Канал", "Выручка"], [("Онлайн", Decimal(10)), ("Магазин", Decimal(5))])
+        bar, _ = suggest_chart(["Канал", "Выручка"], [("Онлайн", Decimal(10)), ("Магазин", Decimal(5))])
         self.assertEqual(bar["type"], "bar")
         self.assertEqual(bar["series"][0]["data"], [10.0, 5.0])
-        line = suggest_chart(["Месяц", "N"], [(dt.datetime(2025, 2, 1), 2), (dt.datetime(2025, 1, 1), 1)])
+        line, _ = suggest_chart(["Месяц", "N"], [(dt.datetime(2025, 2, 1), 2), (dt.datetime(2025, 1, 1), 1)])
         self.assertEqual(line["type"], "line")
         self.assertEqual(line["categories"], ["01.01.2025", "01.02.2025"])
-        self.assertIsNone(suggest_chart(["Канал"], [("a",), ("b",)]))
+        self.assertIsNone(suggest_chart(["Канал"], [("a",), ("b",)])[0])
+
+    def test_pivot_chart_and_template(self):
+        rows = [("Онлайн", dt.date(2025, 1, 1), Decimal(10)), ("Онлайн", dt.date(2025, 2, 1), Decimal(12)),
+                ("Магазин", dt.date(2025, 1, 1), Decimal(5)), ("Магазин", dt.date(2025, 2, 1), Decimal(30))]
+        cols = ["Канал", "Месяц", "Выручка"]
+        chart, note = suggest_chart(cols, rows)
+        self.assertEqual(chart["type"], "line")
+        self.assertEqual(chart["categories"], ["01.01.2025", "01.02.2025"])
+        self.assertEqual([s["name"] for s in chart["series"]], ["Онлайн", "Магазин"])
+        self.assertEqual(chart["series"][1]["data"], [5.0, 30.0])
+        text = template_answer(cols, rows, False)
+        self.assertIn("Максимум — «Магазин», 01.02.2025: 30", text)
+        self.assertIn("Больше всего в сумме — у «Магазин»: 35", text)
+        self.assertEqual(suggest_chart(cols, rows, "pie")[0]["type"], "line")
+
+    def test_chart_views(self):
+        rows = [("Онлайн", 10), ("Магазин", 5)]
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, "pie")[0]["type"], "pie")
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, "line")[0]["type"], "line")
+        self.assertEqual(suggest_chart(["Канал", "N"], rows, question="Доля каналов в продажах")[0]["type"], "pie")
+        self.assertIsNone(suggest_chart(["Канал", "N"], rows, "table")[0])
+        many = [(f"Город {i}", i) for i in range(20)]
+        chart, note = suggest_chart(["Город", "N"], many, "pie")
+        self.assertEqual(chart["type"], "bar")
+        self.assertIn("Круговая диаграмма подходит", note)
 
 
 CATALOG = {"tables": [
@@ -344,6 +369,45 @@ class AnswerTests(unittest.TestCase):
         self.assertIn('SUM("Цена, руб.")', messages[2]["content"])
         self.assertIn("Уточнение к предыдущему вопросу: А теперь только мобильное", messages[3]["content"])
         self.assertEqual(trace["errors"], [])
+
+    def test_pure_view_switch_reuses_last_sql_without_model(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="v1")
+        result, client, trace = ask("Покажи то же самое кругом", [], runner, session="v1")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(result["chart"]["type"], "pie")
+        self.assertEqual(result["answer"], "Вот тот же результат круговой диаграммой.")
+        self.assertEqual(runner.sqls[0], runner.sqls[1])
+
+    def test_view_without_history(self):
+        result, client, _ = ask("Покажи кругом", [], session="v2")
+        self.assertIn("Сначала задайте вопрос", result["answer"])
+
+    def test_followup_with_new_condition_and_view(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="v3")
+        month_sql = ('```sql\nSELECT date_trunc(\'month\', "Дата") AS "Месяц", SUM("Цена, руб.") '
+                     'FROM t GROUP BY 1 ORDER BY 1\n```')
+        runner.rows = [(dt.datetime(2025, 1, 1), Decimal(5)), (dt.datetime(2025, 2, 1), Decimal(7))]
+        runner.columns = ["Месяц", "Выручка"]
+        result, client, trace = ask("По месяцам столбцами", [month_sql, "x"], runner, session="v3")
+        self.assertIn("Уточнение к предыдущему вопросу: По месяцам столбцами", client.calls[0][3]["content"])
+        self.assertEqual(result["chart"]["type"], "bar")  # просили столбцы, хотя это время
+
+    def test_short_refinement_vs_new_question(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="r1")
+        filtered = ('```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t WHERE "Канал продажи" = '
+                    '\'Мобильное приложение\' GROUP BY 1\n```')
+        _, client, trace = ask("Только мобильное приложение", [filtered, GOOD_TEXT], runner, session="r1")
+        self.assertEqual(trace["errors"], [])
+        self.assertIn("Уточнение к предыдущему вопросу", client.calls[0][3]["content"])
+        # после вопроса о доставке короткий вопрос о продажах — новый вопрос, а не продолжение
+        ask("Сколько записей по перевозчикам?", ['```sql\nSELECT "Перевозчик", COUNT(*) FROM t GROUP BY 1\n```',
+                                                "x"], runner, session="r2")
+        _, client, trace = ask("Выручка по каналам продаж", [GOOD_SQL, GOOD_TEXT], runner, session="r2")
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertEqual(client.calls[0][1]["content"], "Вопрос: Выручка по каналам продаж")
 
     def test_no_session_no_memory(self):
         ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT])
