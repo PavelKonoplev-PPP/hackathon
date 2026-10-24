@@ -27,18 +27,21 @@ from pathlib import Path
 
 from collections import OrderedDict
 
+from . import compare as cmp
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int
-from .semantics import (Intent, adjust_sql, check_sql, counted_noun, is_pure_view_request,
-                        overlap, requested_view, same_word, strip_unmentioned_filters,
-                        strong_word, words)
+from .semantics import (MONEY, Intent, adjust_sql, check_sql, counted_noun,
+                        is_pure_view_request, money_formula, overlap, requested_view, same_word,
+                        strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
 
 MAX_ATTEMPTS = 3
 EXPLAIN_ROWS = 20
 
+# Просьбы изменить данные — повелительные формы («удали», «измени»), но не «изменилось».
 WRITE_INTENT = re.compile(
-    r"\b(удал\w*|измен\w*|обнови\w*|перезапиш\w*|очист\w*|вставь|добавь\s+(строк|запис)\w*|"
+    r"\b(удали(те)?|удалить|измени(те)?|изменить|обнови(те)?|обновить|перезапиши(те)?|"
+    r"очисти(те)?|очистить|вставь(те)?|добавь(те)?\s+(строк|запис)\w*|"
     r"drop|delete|truncate|insert|update|alter)\b", re.IGNORECASE)
 ANALYTIC_WORDS = re.compile(r"сколько|средн|сумм|доля|процент|динамик|\bтоп|самы|количеств|"
                             r"сравн|рост|паден|выручк|расход|итог|посчитай|распределен|"
@@ -117,15 +120,16 @@ def _example(table: dict) -> tuple[str, str]:
 
 def build_sql_messages(question: str, table: dict, values: dict[str, list[str]],
                        history: list[dict] | None = None,
-                       previous: dict | None = None) -> list[dict]:
-    """previous — прошлый вопрос и SQL в этом диалоге, если новый вопрос его уточняет."""
+                       previous: dict | None = None, extra_hint: str = "") -> list[dict]:
+    """previous — прошлый вопрос и SQL в этом диалоге, если новый вопрос его уточняет.
+    extra_hint — дополнительная инструкция (например, границы периодов для сравнения)."""
     columns = "\n".join(_column_line(c, values) for c in table.get("columns") or [])
     example_q, example_sql = _example(table)
     mentioned = mentioned_columns(question, table)
     hint = ("\nПодсказка: в вопросе, вероятно, речь о колонках "
             + ", ".join(f'"{c}"' for c in mentioned) + ".\n") if mentioned else ""
     system = SQL_PROMPT.format(columns=columns, example_q=example_q,
-                               example_sql=example_sql, hint=hint)
+                               example_sql=example_sql, hint=hint + extra_hint)
     messages = [{"role": "system", "content": system}]
     if previous:
         messages += [
@@ -261,7 +265,7 @@ def format_value(value) -> str:
         return format_int(value)
     if isinstance(value, (Decimal, float)):
         number = float(value)
-        if number.is_integer() and abs(number) >= 100:
+        if number.is_integer():
             return format_int(int(number))
         return f"{number:,.2f}".replace(",", " ").replace(".", ",")
     if isinstance(value, dt.datetime):
@@ -503,6 +507,20 @@ def _match_option(message: str, options: list[str]) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def compare_metric(question: str, table: dict) -> str:
+    """Выражение показателя для подсказки сравнения: выручка, упомянутая числовая колонка
+    или COUNT(*)."""
+    columns = [c["name"] for c in table.get("columns") or []]
+    formula = money_formula(columns)
+    if formula and MONEY.search(question):
+        return formula
+    asked = words(question)
+    for c in table.get("columns") or []:
+        if column_kind(c) in ("integer", "decimal") and overlap(asked, words(c["name"])):
+            return f'SUM("{c["name"]}")'
+    return "COUNT(*)"
+
+
 def is_followup(question: str) -> bool:
     """Явное продолжение: «а теперь…», «то же самое…», просьба о виде («по месяцам линией»)."""
     return bool(FOLLOWUP_START.search(question) or FOLLOWUP_WORDS.search(question)
@@ -648,7 +666,39 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                               "строка — это позиция, а не целая операция.",
                     "clarification": {"question": "Что считать?", "options": options}}
 
-    # 4. SQL с проверками
+    # 4. Сравнение периодов? Границы дат считает код.
+    periods: list = []
+    date_col = None
+    extra_hint = ""
+    if cmp.is_compare(full_question):
+        kinds = {c["name"]: column_kind(c) for c in table.get("columns") or []}
+        date_col = cmp.choose_date_column(table, full_question, kinds)
+        latest = None
+        if date_col and hasattr(runner, "date_range"):
+            try:
+                latest = runner.date_range(table, date_col)[1]
+            except Exception:
+                latest = None
+        if isinstance(latest, dt.datetime):
+            latest = latest.date()
+        periods = cmp.parse_periods(full_question, latest) if date_col else []
+        if len(periods) >= 2:
+            periods = periods[-2:]
+            extra_hint = cmp.compare_hint(periods, date_col, compare_metric(full_question, table))
+            trace["periods"] = [p.label for p in periods]
+            say("Сравнение: " + " и ".join(p.label for p in periods))
+        else:
+            periods = []
+
+    if periods and previous:
+        # сравнение перестраивает запрос целиком: прошлый SQL только сбивает модель
+        question, previous = full_question, None
+
+    formula = money_formula([c["name"] for c in table.get("columns") or []])
+    if formula and MONEY.search(full_question):
+        extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
+
+    # 5. SQL с проверками
     values = (values_by_table or {}).get(table["name"])
     if values is None:
         values = runner.category_values(table)
@@ -660,7 +710,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     for attempt in range(1, MAX_ATTEMPTS + 1):
         trace["attempts"] = attempt
         say(f"Пишу SQL (попытка {attempt})")
-        reply = client_chat(client, build_sql_messages(question, table, values, history, previous))
+        reply = client_chat(client, build_sql_messages(question, table, values, history, previous,
+                                                       extra_hint))
         try:
             sql = adjust_sql(validate_sql(extract_sql(reply), column_names), intent)
             sql, removed = strip_unmentioned_filters(sql, full_question, values, table_words)
@@ -670,6 +721,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
             problems = check_sql(sql, full_question, intent, values,
                                  strict=attempt < MAX_ATTEMPTS, ignore=table_words,
                                  numeric_columns=numeric_columns, columns=column_names)
+            if periods:
+                problems += cmp.check_compare_sql(sql, periods, date_col)
             if problems:
                 raise SQLRejected(" ".join(problems))
             result = runner.run(table, sql)
@@ -695,6 +748,21 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         return {"answer": "По такому запросу в данных ничего не нашлось. Проверьте условия "
                           "(период, значения фильтров).", "sql": shown_sql}
 
+    if periods:
+        enriched = cmp.enrich_compare(result.columns, result.rows, periods)
+        if enriched:
+            columns, rows, pair = enriched
+            answer = cmp.compare_summary(columns, rows, pair, format_value)
+            note = missing_note(sql, table)
+            response = {
+                "answer": f"{answer} {note}".strip(),
+                "table": {"columns": columns,
+                          "rows": [[_format_change(c, v) for c, v in zip(columns, row)] for row in rows]},
+                "sql": shown_sql,
+                "chart": cmp.compare_chart(columns, rows, pair, format_value),
+            }
+            return response
+
     say("Объясняю результат")
     data = result_text(result.columns, result.rows, result.truncated)
     answer = client_chat(client, [
@@ -710,10 +778,31 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if note:
         answer = f"{answer} {note}"
 
+    if cmp.is_compare(full_question):
+        answer = f"{answer} {two_segment_difference(result.columns, result.rows)}".strip()
     response = _result_response(result, sql, table, requested_view(question), full_question)
     note = response.pop("_note", "")
     response["answer"] = f"{answer} {note}".strip()
     return response
+
+
+def _format_change(column: str, value) -> str:
+    if column == "Изменение, %" and value is not None:
+        return f"{'+' if value > 0 else ''}{value:.1f}%".replace(".", ",")
+    if column == "Изменение" and value is not None and value > 0:
+        return "+" + format_value(value)
+    return format_value(value)
+
+
+def two_segment_difference(columns: list[str], rows: list[tuple]) -> str:
+    """«Сравни Москву и Казань»: два значения — разница кодом, а не моделью."""
+    if len(rows) != 2 or len(columns) != 2 or not all(_is_number(r[1]) for r in rows):
+        return ""
+    (a, x), (b, y) = sorted(rows, key=lambda r: r[1], reverse=True)
+    diff = float(x) - float(y)
+    pct = f" ({diff / float(y) * 100:.1f}%)".replace(".", ",") if y else ""
+    return (f"«{format_value(a)}» больше «{format_value(b)}» на {format_value(diff)}{pct} "
+            f"по показателю «{columns[1]}».")
 
 
 def _result_response(result, sql: str, table: dict, view: str | None, question: str) -> dict:

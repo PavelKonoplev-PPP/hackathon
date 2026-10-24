@@ -34,9 +34,13 @@ CASTABLE_POLICIES = {"safe_complete", "safe_with_nulls"}
 _VALUES_CACHE: dict[tuple[str, str], dict[str, list[str]]] = {}
 
 
+_RANGE_CACHE: dict[tuple[str, str, str], tuple] = {}
+
+
 def clear_values_cache() -> None:
     """Вызвать после загрузки/обновления данных."""
     _VALUES_CACHE.clear()
+    _RANGE_CACHE.clear()
 
 
 def quote_ident(name: str) -> str:
@@ -162,3 +166,11 @@ class PostgresRunner:
                 values[col["name"]] = sorted(str(r[0]) for r in rows)
         _VALUES_CACHE[key] = values
         return values
+
+    def date_range(self, table: dict, column: str) -> tuple:
+        """(минимум, максимум) колонки с датой — для «сентябрь» без года и «прошлый месяц»."""
+        key = (self.schema, table["name"], column)
+        if key not in _RANGE_CACHE:
+            result = self.run(table, f'SELECT MIN({quote_ident(column)}), MAX({quote_ident(column)}) FROM t')
+            _RANGE_CACHE[key] = tuple(result.rows[0]) if result.rows else (None, None)
+        return _RANGE_CACHE[key]

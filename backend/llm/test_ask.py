@@ -314,6 +314,9 @@ class AnswerTests(unittest.TestCase):
         self.assertIn("не похож на вопрос к загруженным данным", result["answer"])
         result, client, _ = ask("Удали все продажи", [])
         self.assertIn("только на чтение", result["answer"])
+        from backend.llm.ask import WRITE_INTENT
+        self.assertIsNone(WRITE_INTENT.search("Как изменилась выручка по сравнению с 2024?"))
+        self.assertTrue(WRITE_INTENT.search("Измени цену товара"))
         self.assertEqual(client.calls, [])
 
     def test_tie_asks_which_table_then_uses_answer(self):
