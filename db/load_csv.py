@@ -91,12 +91,19 @@ def import_file(
     root: Path,
     schema: str,
     replace: bool,
+    *,
+    delimiter: str = ";",
+    encoding: str = "utf-8-sig",
+    table_name: str | None = None,
+    source_name: str | None = None,
 ) -> int:
-    table = table_name_for(path)
+    table = table_name or table_name_for(path)
+    if delimiter not in (";", ",", "\t", "|"):
+        raise ValueError("Недопустимый разделитель CSV")
     qualified = sql.Identifier(schema, table)
 
-    with path.open("r", encoding="utf-8-sig", newline="") as file:
-        reader = csv.reader(file, delimiter=";", quotechar='"')
+    with path.open("r", encoding=encoding, newline="") as file:
+        reader = csv.reader(file, delimiter=delimiter, quotechar='"', strict=True)
         headers = next(reader, None)
         if headers is None:
             raise ValueError(f"{path}: пустой CSV")
@@ -171,7 +178,7 @@ def import_file(
                 (
                     schema,
                     table,
-                    str(path.relative_to(root)),
+                    source_name if source_name is not None else str(path.relative_to(root)),
                     Jsonb(headers),
                     Jsonb(columns),
                     count,
