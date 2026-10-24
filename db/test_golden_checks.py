@@ -33,6 +33,8 @@ class GoldenTests(unittest.TestCase):
         cur = Mock()
         cur.fetchone.side_effect = [(10,), None]
         conn = Mock()
+        conn.transaction.return_value.__enter__ = Mock()
+        conn.transaction.return_value.__exit__ = Mock(return_value=False)
         conn.cursor.return_value.__enter__ = Mock(return_value=cur)
         report = run_checks(conn, [{"id": "returns", "sql": "SELECT 10", "expected": 5819}])
         self.assertEqual(report["failed"], 1)
