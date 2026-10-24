@@ -26,7 +26,7 @@ def audit(stamp="t1", cols=None):
     return {
         "schema": "raw", "generated_at_utc": stamp,
         "source_profile_generated_at_utc": stamp,
-        "statistics_are_full_column": True, "summary": {},
+        "statistics_are_full_column": True, "summary": {"failed_columns": 0},
         "columns": cols or [],
     }
 
@@ -88,7 +88,7 @@ class RefreshTests(unittest.TestCase):
             pf.assert_called_once()
             self.assertIsNone(pf.call_args.kwargs.get("table"))
 
-    def test_other_table_added_forces_full_refresh(self):
+    def test_one_new_table_uses_incremental_refresh(self):
         with tempfile.TemporaryDirectory() as root:
             folder = Path(root)
             old_p, old_a = profile(["old"]), audit()
@@ -101,11 +101,10 @@ class RefreshTests(unittest.TestCase):
             ):
                 (folder / name).write_text(json.dumps(value))
             with patch("refresh_catalog.get_tables", return_value=[("old", 1), ("new", 1)]), patch(
-                "refresh_catalog.profile_database", return_value=profile(["old", "new"], "t2")
+                "refresh_catalog.profile_database", return_value=profile(["new"], "t2")
             ) as pf, patch("refresh_catalog.audit_profile", return_value=audit("t2")):
                 report = refresh_catalog(Mock(), table="new", data_dir=folder)
-            # Other tables unchanged: incremental refresh is allowed, but only
-            # when the request names the one newly imported table.
+            # Other tables unchanged: the one newly imported table is profiled.
             self.assertEqual(report["mode"], "incremental")
             pf.assert_called_once()
 
