@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import argparse
 import copy
-import fcntl
 import json
 import os
 import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 import psycopg
 
@@ -40,11 +44,13 @@ def _locked_directory(folder: Path):
     folder.mkdir(parents=True, exist_ok=True)
     # Serialize concurrent uploads. Lock file is not part of the published catalog.
     with (folder / ".catalog-refresh.lock").open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _load_previous(folder: Path, schema: str) -> tuple[dict, dict] | None:

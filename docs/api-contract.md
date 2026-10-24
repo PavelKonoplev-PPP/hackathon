@@ -38,6 +38,54 @@
 
 Ошибка: любой статус не 2xx — фронтенд покажет «Не удалось получить ответ».
 
+## GET /api/schema (алиас: GET /schema)
+
+Каталог доступных источников, таблиц, колонок, типов, числа строк, предупреждений качества и связей (Issue #39 / BI-11).
+
+Ответ:
+
+```json
+{
+  "schema_name": "raw",
+  "sources": ["raw", "data_01_Продажи"],
+  "tables": [
+    {
+      "name": "data_01_Продажи",
+      "display_name": "Продажи",
+      "row_count": 500000,
+      "columns": [
+        {
+          "name": "Код позиции",
+          "type": "identifier",
+          "postgres_type": "text",
+          "inferred_type": "identifier",
+          "nullable": true,
+          "warning": null
+        }
+      ],
+      "warnings": []
+    }
+  ],
+  "relationships": [
+    {
+      "source_table": "data_01_Продажи",
+      "source_column": "Код исходной позиции",
+      "target_table": "data_01_Продажи",
+      "target_column": "Код позиции",
+      "kind": "self_reference_candidate",
+      "can_auto_join": false,
+      "policy": "manual_approval_required",
+      "source": { "table": "data_01_Продажи", "column": "Код исходной позиции" },
+      "target": { "table": "data_01_Продажи", "column": "Код позиции" }
+    }
+  ],
+  "warnings": [
+    "Достоверность типов эвристическая",
+    "Связи между таблицами не верифицированы бизнесом (требуется ручное подтверждение)"
+  ]
+}
+```
+
 ## Дашборды (на втором этапе)
 
 Эндпоинты будут добавлены вместе с задачей про дашборды (#6).

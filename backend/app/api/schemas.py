@@ -71,3 +71,49 @@ class ChatResponse(BaseModel):
     table: TableSpec | None = None
     sql: str | None = None
     clarification: ClarificationSpec | None = None
+
+
+# Schema / Catalog endpoint schemas (/api/schema conforming to Issue #39)
+class ColumnSchema(BaseModel):
+    """Metadata for a table column."""
+
+    name: str
+    type: str | None = None
+    postgres_type: str | None = None
+    inferred_type: str | None = None
+    nullable: bool = True
+    warning: str | None = None
+
+
+class TableSchema(BaseModel):
+    """Metadata for an available database table."""
+
+    name: str
+    display_name: str | None = None
+    row_count: int | None = None
+    columns: list[ColumnSchema] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RelationshipSchema(BaseModel):
+    """Foreign key or join candidate relationship."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    kind: str | None = None
+    can_auto_join: bool = False
+    policy: str | None = None
+    source: dict[str, Any] | None = None
+    target: dict[str, Any] | None = None
+
+
+class SchemaResponse(BaseModel):
+    """Response model for /api/schema and /schema."""
+
+    schema_name: str = "raw"
+    sources: list[str] = Field(default_factory=list)
+    tables: list[TableSchema] = Field(default_factory=list)
+    relationships: list[RelationshipSchema] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
