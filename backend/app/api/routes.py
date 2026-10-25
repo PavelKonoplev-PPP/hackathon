@@ -13,11 +13,15 @@ from .schemas import (
     HealthResponse,
     RelationshipSchema,
     SchemaResponse,
+    DashboardCreateRequest,
+    DashboardDetail,
+    DashboardSummary,
+    DashboardUpdateRequest,
     TableSchema,
 )
 from ..db.session import check_db
 from ..llm.client import LLMError
-from ..services import agent, datasources
+from ..services import agent, dashboards, datasources
 
 try:
     from backend.llm.catalog_summary import display_table_name, table_row_count
@@ -258,3 +262,54 @@ def create_datasource(body: DataSourceCreateRequest) -> DataSourceResponse:
         raise HTTPException(
             status_code=500, detail=f"Failed to register datasource: {exc}"
         ) from exc
+
+
+# Dashboard endpoints (Sprint 4 / BI-15 / Issue #43)
+@router.get("/api/dashboards", response_model=list[DashboardSummary])
+@router.get("/dashboards", response_model=list[DashboardSummary])
+def get_dashboards() -> list[DashboardSummary]:
+    """List all saved analytical dashboards."""
+    return dashboards.list_dashboards()
+
+
+@router.post("/api/dashboards", response_model=DashboardDetail, status_code=201)
+@router.post("/dashboards", response_model=DashboardDetail, status_code=201)
+def create_dashboard_endpoint(body: DashboardCreateRequest) -> DashboardDetail:
+    """Create and persist a new analytical dashboard."""
+    try:
+        return dashboards.create_dashboard(body)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create dashboard: {exc}"
+        ) from exc
+
+
+@router.get("/api/dashboards/{dashboard_id}", response_model=DashboardDetail)
+@router.get("/dashboards/{dashboard_id}", response_model=DashboardDetail)
+def get_dashboard_endpoint(dashboard_id: str) -> DashboardDetail:
+    """Retrieve full details of a saved dashboard by ID."""
+    dash = dashboards.get_dashboard(dashboard_id)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard '{dashboard_id}' not found.")
+    return dash
+
+
+@router.put("/api/dashboards/{dashboard_id}", response_model=DashboardDetail)
+@router.put("/dashboards/{dashboard_id}", response_model=DashboardDetail)
+def update_dashboard_endpoint(
+    dashboard_id: str, body: DashboardUpdateRequest
+) -> DashboardDetail:
+    """Update title, description, or widgets of an existing dashboard."""
+    dash = dashboards.update_dashboard(dashboard_id, body)
+    if not dash:
+        raise HTTPException(status_code=404, detail=f"Dashboard '{dashboard_id}' not found.")
+    return dash
+
+
+@router.delete("/api/dashboards/{dashboard_id}", status_code=204)
+@router.delete("/dashboards/{dashboard_id}", status_code=204)
+def delete_dashboard_endpoint(dashboard_id: str) -> None:
+    """Delete a saved dashboard by ID."""
+    deleted = dashboards.delete_dashboard(dashboard_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Dashboard '{dashboard_id}' not found.")
