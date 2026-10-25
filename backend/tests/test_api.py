@@ -298,11 +298,123 @@ class ApiTests(unittest.TestCase):
             "Что передо мной?",
             "Опиши данные",
             "Какие таблицы доступны?",
+            "Что это за данные?",
+            "Что за данные?",
+            "Расскажи про данные",
+            "Опиши таблицы",
+            "Обзор данных",
         ]
         for p in phrases:
             self.assertTrue(agent.is_describe_intent(p), f"Failed to match describe intent for: {p}")
         self.assertFalse(agent.is_describe_intent("Какая выручка за май?"))
 
+    def test_chat_refuses_out_of_scope_metric_with_suggestions(self) -> None:
+        """Issue #33 / BI-05: Запрос отсутствующих метрик возвращает 200 с пояснением и подсказками."""
+        queries = [
+            ("Какой средний NPS у клиентов?", "NPS"),
+            ("Посчитай ROI рекламных кампаний", "ROI"),
+            ("Покажи LTV клиентов", "LTV"),
+            ("Какая эффективность рекламы на ТВ?", "ТВ"),
+            ("Сколько потратили на ТВ?", "ТВ"),
+            ("Сколько товаров на складе?", "склад"),
+            ("Какая зарплата у курьеров?", "заработной плате"),
+        ]
+        for query, expected_mention in queries:
+            with self.subTest(query=query):
+                response = self.client.post(
+                    "/api/chat",
+                    json={"session_id": "test-session-out-of-scope", "message": query},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertIsNone(data["sql"])
+                self.assertIsNone(data["table"])
+                self.assertIsNone(data["chart"])
+                self.assertIn(expected_mention.lower(), data["answer"].lower())
+                self.assertIn("Вы можете запросить", data["answer"])
+                self.assertIn("- «", data["answer"])
+
+    def test_chat_blocks_destructive_sql_mutation(self) -> None:
+        """Issue #33 / BI-05: Попытки изменения данных блокируются с кодом 200 и объяснением."""
+        mutations = [
+            "DROP TABLE data_01_Продажи",
+            "DELETE FROM data_01_Продажи WHERE 1=1",
+            "UPDATE data_01_Продажи SET status = 'deleted'",
+            "ALTER TABLE data_01_Продажи DROP COLUMN price",
+            "INSERT INTO data_01_Продажи VALUES ('1', '2')",
+            "TRUNCATE TABLE data_01_Продажи",
+            "TRUNCATE data_01_Продажи",
+            "Удали все данные о продажах",
+            "Очисти таблицу доставок",
+            "Сотри все данные из таблицы продаж",
+            "Дропни таблицу",
+            "Снеси все записи",
+        ]
+        for cmd in mutations:
+            with self.subTest(cmd=cmd):
+                response = self.client.post(
+                    "/api/chat",
+                    json={"session_id": "test-session-mutation", "message": cmd},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertIsNone(data["sql"])
+                self.assertIsNone(data["table"])
+                self.assertIsNone(data["chart"])
+                self.assertIn("только на чтение", data["answer"])
+                self.assertIn("запрещены", data["answer"])
+                self.assertIn("Вы можете запросить", data["answer"])
+
+    def test_chat_handles_ambiguous_query_with_clarification(self) -> None:
+        """Issue #33 / BI-05: Неоднозначные запросы возвращают 200 с clarification и подсказками."""
+        ambiguous = [
+            "Покажи метрики",
+            "Какая статистика?",
+            "Сделай сводку",
+            "Покажи все метрики",
+            "Сводка по данным",
+            "Что с эффективностью бизнеса?",
+        ]
+        for query in ambiguous:
+            with self.subTest(query=query):
+                response = self.client.post(
+                    "/api/chat",
+                    json={"session_id": "test-session-ambiguous", "message": query},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertIsNone(data["sql"])
+                self.assertIsNone(data["table"])
+                self.assertIsNone(data["chart"])
+                self.assertIsNotNone(data["clarification"])
+                self.assertGreaterEqual(len(data["clarification"]["options"]), 2)
+                self.assertIn("слишком обобщённо", data["answer"])
+                self.assertIn("Вы можете запросить", data["answer"])
+
+    @patch.object(agent, "get_reader_connection", side_effect=Exception("could not connect to server"))
+    def test_chat_returns_503_when_db_down(self, mock_conn: MagicMock) -> None:
+        """Issue #33 / BI-05: Отказ инфраструктуры БД возвращает HTTP 503."""
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-db-down", "message": "Какая выручка по каналам продаж?"},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Не удалось подключиться к базе данных под bi_reader", response.json()["detail"])
+
+    @patch.object(agent, "get_reader_connection", return_value=MagicMock())
+    @patch.object(agent, "answer_question", side_effect=Exception("Ollama connection refused"))
+    def test_chat_returns_503_when_llm_fails_in_answer_question(
+        self, mock_answer: MagicMock, mock_conn: MagicMock
+    ) -> None:
+        """Issue #33 / BI-05: Сбой LLM во время answer_question возвращает HTTP 503."""
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-llm-fail", "message": "Какая выручка по каналам продаж?"},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Ошибка при ответе на вопрос", response.json()["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
