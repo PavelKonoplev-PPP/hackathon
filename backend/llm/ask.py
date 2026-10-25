@@ -27,6 +27,7 @@ from pathlib import Path
 
 from collections import OrderedDict
 
+from . import advanced_analytics as adv
 from . import compare as cmp
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -761,6 +762,13 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         # сравнение перестраивает запрос целиком: прошлый SQL только сбивает модель
         question, previous = full_question, None
 
+    if adv.is_seasonality(full_question):
+        kinds_map = {c["name"]: column_kind(c) for c in table.get("columns") or []}
+        date_col_season = cmp.choose_date_column(table, full_question, kinds_map)
+        if date_col_season:
+            extra_hint += adv.seasonality_hint(date_col_season, compare_metric(full_question, table))
+
+
     formula = money_formula([c["name"] for c in table.get("columns") or []])
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
@@ -847,6 +855,30 @@ def answer_question(question: str, catalog: dict, runner, client=None,
 
     if cmp.is_compare(full_question):
         answer = f"{answer} {two_segment_difference(result.columns, result.rows)}".strip()
+
+    if adv.is_seasonality(full_question):
+        season_analysis = adv.analyze_seasonality(result.columns, result.rows)
+        if season_analysis:
+            season_text = adv.seasonality_summary(season_analysis)
+            answer = f"{answer} {season_text}".strip()
+
+    if adv.is_correlation(full_question) and len(result.columns) >= 2 and len(result.rows) >= 3:
+        try:
+            x_vals = [float(str(r[0]).replace(",", ".").replace(" ", "")) for r in result.rows if r[0] is not None]
+            y_vals = [float(str(r[1]).replace(",", ".").replace(" ", "")) for r in result.rows if r[1] is not None]
+            if len(x_vals) == len(y_vals) and len(x_vals) >= 3:
+                r_val = adv.calculate_pearson(x_vals, y_vals)
+                if r_val is not None:
+                    corr_text = adv.correlation_summary(r_val, result.columns[0], result.columns[1])
+                    answer = f"{answer} {corr_text}".strip()
+        except Exception:
+            pass
+
+    if adv.is_segmentation(full_question) and len(result.columns) >= 2 and len(result.rows) >= 2:
+        seg_text = adv.segmentation_summary(result.columns, result.rows)
+        if seg_text:
+            answer = f"{answer}\n\n{seg_text}".strip()
+
     response = _result_response(result, sql, table, requested_view(question), full_question)
     note = response.pop("_note", "")
     response["answer"] = f"{answer} {note}".strip()
