@@ -1217,6 +1217,106 @@ class ApiTests(unittest.TestCase):
                 self.assertIn("«users»", data["answer"])
 
 
+    def test_dashboards_crud_lifecycle(self) -> None:
+        """Issue #43 / BI-15: Full CRUD lifecycle for analytical dashboards."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "dashboards.json"
+            from backend.app.services import dashboards
+
+            with patch.object(dashboards, "get_dashboards_path", return_value=temp_file):
+                # 1. Initial list is empty
+                resp = self.client.get("/api/dashboards")
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(resp.json(), [])
+
+                # 2. Create dashboard
+                create_payload = {
+                    "title": "Продажи и выручка",
+                    "description": "Сводный мониторинг каналов",
+                    "datasource_id": "raw",
+                    "widgets": [
+                        {
+                            "id": "w_sales_bar",
+                            "title": "Выручка по каналам",
+                            "type": "chart",
+                            "sql": "SELECT 1;",
+                            "chart": {
+                                "type": "bar",
+                                "title": "Выручка",
+                                "x": ["Интернет", "Розница"],
+                                "series": [{"name": "Выручка", "data": [100, 200]}],
+                            },
+                        }
+                    ],
+                }
+                resp_create = self.client.post("/api/dashboards", json=create_payload)
+                self.assertEqual(resp_create.status_code, 201)
+                dash = resp_create.json()
+                dash_id = dash["id"]
+                self.assertTrue(dash_id.startswith("dash_"))
+                self.assertEqual(dash["title"], "Продажи и выручка")
+                self.assertEqual(len(dash["widgets"]), 1)
+                self.assertEqual(dash["widgets"][0]["id"], "w_sales_bar")
+
+                # 3. List contains 1 summary
+                resp_list = self.client.get("/api/dashboards")
+                self.assertEqual(resp_list.status_code, 200)
+                items = resp_list.json()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["id"], dash_id)
+                self.assertEqual(items[0]["widget_count"], 1)
+
+                # 4. Get by ID (both /api/dashboards/{id} and /dashboards/{id})
+                resp_get = self.client.get(f"/api/dashboards/{dash_id}")
+                self.assertEqual(resp_get.status_code, 200)
+                self.assertEqual(resp_get.json()["id"], dash_id)
+
+                resp_alias = self.client.get(f"/dashboards/{dash_id}")
+                self.assertEqual(resp_alias.status_code, 200)
+                self.assertEqual(resp_alias.json(), resp_get.json())
+
+                # 5. Update dashboard
+                update_payload = {
+                    "title": "Обновленные продажи",
+                    "description": "Новое описание",
+                }
+                resp_put = self.client.put(f"/api/dashboards/{dash_id}", json=update_payload)
+                self.assertEqual(resp_put.status_code, 200)
+                updated = resp_put.json()
+                self.assertEqual(updated["title"], "Обновленные продажи")
+                self.assertEqual(updated["description"], "Новое описание")
+                self.assertEqual(len(updated["widgets"]), 1)
+
+                # 6. Delete dashboard
+                resp_del = self.client.delete(f"/api/dashboards/{dash_id}")
+                self.assertEqual(resp_del.status_code, 204)
+
+                # 7. 404 after delete
+                resp_get_after = self.client.get(f"/api/dashboards/{dash_id}")
+                self.assertEqual(resp_get_after.status_code, 404)
+
+                resp_del_after = self.client.delete(f"/api/dashboards/{dash_id}")
+                self.assertEqual(resp_del_after.status_code, 404)
+
+    def test_dashboards_slug_collision_resolution(self) -> None:
+        """Issue #43 / BI-15: Creating dashboards with identical titles generates unique IDs."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "dashboards.json"
+            from backend.app.services import dashboards
+
+            with patch.object(dashboards, "get_dashboards_path", return_value=temp_file):
+                resp1 = self.client.post("/api/dashboards", json={"title": "Тестовый дашборд"})
+                self.assertEqual(resp1.status_code, 201)
+                id1 = resp1.json()["id"]
+
+                resp2 = self.client.post("/api/dashboards", json={"title": "Тестовый дашборд"})
+                self.assertEqual(resp2.status_code, 201)
+                id2 = resp2.json()["id"]
+
+                self.assertNotEqual(id1, id2)
+                self.assertTrue(id2.endswith("_2"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

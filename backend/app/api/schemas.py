@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from typing import Any, Literal
 from pydantic import BaseModel, Field, model_validator
 
@@ -228,3 +230,59 @@ class DataSourceResponse(BaseModel):
     def enforce_masked_credentials(self) -> DataSourceResponse:
         self.password = "******"
         return self
+
+
+# Dashboard schemas (/api/dashboards conforming to Issue #43 / Scenario 5)
+class DashboardWidget(BaseModel):
+    """Widget inside an analytical dashboard."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    title: str
+    type: str = "chart"  # chart | table | metric | text
+    sql: str | None = None
+    chart: ChartSpec | None = None
+    table: TableSpec | None = None
+    answer: str | None = None
+    grid: dict[str, Any] | None = None
+
+
+class DashboardCreateRequest(BaseModel):
+    """Request payload to create a new dashboard."""
+
+    title: str = Field(..., min_length=1)
+    description: str | None = None
+    datasource_id: str = "raw"
+    widgets: list[DashboardWidget] = Field(default_factory=list)
+
+
+class DashboardUpdateRequest(BaseModel):
+    """Request payload to update an existing dashboard."""
+
+    title: str | None = None
+    description: str | None = None
+    datasource_id: str | None = None
+    widgets: list[DashboardWidget] | None = None
+
+
+class DashboardSummary(BaseModel):
+    """Summary of a saved dashboard for list views."""
+
+    id: str
+    title: str
+    description: str | None = None
+    datasource_id: str = "raw"
+    widget_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class DashboardDetail(BaseModel):
+    """Full detail of a saved dashboard with all widgets."""
+
+    id: str
+    title: str
+    description: str | None = None
+    datasource_id: str = "raw"
+    widgets: list[DashboardWidget] = Field(default_factory=list)
+    created_at: str
+    updated_at: str

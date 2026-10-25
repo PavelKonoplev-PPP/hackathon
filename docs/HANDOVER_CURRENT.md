@@ -1,40 +1,43 @@
-# Handover Checkpoint: Sprint 3 Complete (BI-09 / Issue #37)
+# Handover Checkpoint: Sprint 4 Complete (BI-15 / Issue #43)
 
-> **Статус**: Спринт 3 успешно завершён  
-> **Дедлайн**: Чекпоинт 2 (31.10.2026)  
+> **Статус**: Спринт 4 успешно завершён  
+> **Дедлайн**: Финальный этап (Сценарий №5 и Технический критерий №5)  
 > **Ветка**: `main`  
-> **База данных**: PostgreSQL 16 (схема `raw`, 9 таблиц, 5 376 000 строк) + поддержка внешних PostgreSQL  
+> **База данных**: PostgreSQL 16 + внешние PostgreSQL  
+> **Хранилище дашбордов**: `data/dashboards.json` (атомарная персистентность)  
 > **LLM**: Ollama `qwen-bi:latest` (локально, порт 11434)
 
 ---
 
-## 1. Что выполнено в Спринте 3 ([BI-09] Issue #37)
+## 1. Что выполнено в Спринте 4 ([BI-15] Issue #43)
 
-1. **Подключение и тестирование внешних PostgreSQL (Технический критерий №1)**:
-   - В [`backend/app/services/datasources.py`](backend/app/services/datasources.py) реализована функция `test_postgres_connection()`:
-     - Подключение через `psycopg` со строгим таймаутом `connect_timeout=3` сек и read-only опциями: `-c default_transaction_read_only=on -c statement_timeout=5000`.
-     - Автоматическое обнаружение доступных пользовательских таблиц через `information_schema.tables`.
-     - Замер сетевой задержки подключения (latency в миллисекундах).
-     - Санитизация ошибок с гарантированным скрытием паролей и URL-авторизации.
-2. **REST API эндпоинты источников данных**:
-   - `POST /api/datasources/test`: быстрое тестирование подключения к внешней PostgreSQL без сохранения конфигурации;
-   - `GET /api/datasources`: получение списка источников (включая дефолтный `raw`), с гарантированным маскированием паролей (`"******"`);
-   - `POST /api/datasources`: валидация подключения и персистентное сохранение конфигурации в `data/datasources.json`.
-3. **Pydantic схемы и спецификация**:
-   - В [`backend/app/api/schemas.py`](backend/app/api/schemas.py) созданы: `DataSourceTestRequest`, `DataSourceTestResponse`, `DataSourceCreateRequest`, `DataSourceResponse`.
-   - Поддержаны алиасы полей (`database` -> `dbname`, `username` -> `user`).
-   - Документация и примеры добавлены в [`docs/api-contract.md`](docs/api-contract.md).
-4. **Интеграция с чат-агентом**:
-   - Зарегистрированные внешние источники автоматически распознаются агентом в `filter_catalog_for_scope()` при передаче `datasource_id`.
-5. **Тестирование**:
-   - Модульные и интеграционные тесты в [`backend/tests/test_api.py`](backend/tests/test_api.py).
-   - Фронтенд не затронут (директория `frontend/` чистая).
+1. **REST API управления дашбордами**:
+   - `GET /api/dashboards`: сводный список сохранённых дашбордов (`DashboardSummary`);
+   - `POST /api/dashboards`: создание дашборда с виджетами, SQL, типами графиков и метаданными (возврат HTTP 201 Created);
+   - `GET /api/dashboards/{id}`: загрузка полной конфигурации дашборда (`DashboardDetail`);
+   - `PUT /api/dashboards/{id}`: обновление названия, описания, источника или списка виджетов;
+   - `DELETE /api/dashboards/{id}`: удаление дашборда (возврат HTTP 204 No Content).
+2. **Сервис хранения ([`backend/app/services/dashboards.py`](backend/app/services/dashboards.py))**:
+   - Персистентное хранение в `data/dashboards.json`.
+   - Атомарная запись через `.tmp` и `os.replace` для защиты от повреждения данных при конкурентных запросах.
+   - Автоматическая транслитерация кириллических заголовков в slug и разрешение коллизий идентификаторов (`_2`, `_3`).
+3. **Pydantic схемы и контракты**:
+   - `DashboardWidget`, `DashboardCreateRequest`, `DashboardUpdateRequest`, `DashboardSummary`, `DashboardDetail`.
+   - Полная спецификация задокументирована в [`docs/api-contract.md`](docs/api-contract.md).
+4. **Тесты и качество**:
+   - `backend\.venv\Scripts\pytest backend`: **161 passed, 2 skipped, 0 failed** (все 57 тестов API зелёные).
+   - `python -m unittest discover -s db -p "test_*.py"`: **92 passed, 0 failed**.
+   - `frontend/` не изменялся (директория чистая).
 
 ---
 
-## 2. Что предстоит сделать (Следующий шаг: Спринт 4)
+## 2. Что предстоит сделать (Следующий шаг: Спринт 5)
 
-* **Спринт 4 (P1)**: [BI-15] Issue #43 — Сохранение, открытие и удаление дашбордов (`/api/dashboards`).
+* **Спринт 5 (Финал — Сценарии 7–10)**:
+  - Сценарий 7: Выявление повторяющихся закономерностей во времени (сезонность, периодические пики);
+  - Сценарий 8: Сегментация клиентов и ключевые отличия;
+  - Сценарий 9: Поиск корреляций и временных лагов;
+  - Сценарий 10: Экстраполяция и сценарии «что если».
 
 ---
 
@@ -42,5 +45,5 @@
 
 Если контекст переполнен, откройте новый диалог и отправьте первую фразу:
 ```text
-Продолжаем работу над бэкендом хакатона. Изучи docs/HANDOVER_CURRENT.md, проверь git status и запускай Спринт 4: [BI-15] Issue #43 (сохранение и управление аналитическими дашбордами).
+Продолжаем работу над бэкендом хакатона. Изучи docs/HANDOVER_CURRENT.md, проверь git status и запускай Спринт 5 (продвинутая аналитика: сезонность, когорты, лаги, сценарии 7–10).
 ```
