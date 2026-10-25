@@ -6,6 +6,10 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     ColumnSchema,
+    DataSourceCreateRequest,
+    DataSourceResponse,
+    DataSourceTestRequest,
+    DataSourceTestResponse,
     HealthResponse,
     RelationshipSchema,
     SchemaResponse,
@@ -13,7 +17,7 @@ from .schemas import (
 )
 from ..db.session import check_db
 from ..llm.client import LLMError
-from ..services import agent
+from ..services import agent, datasources
 
 try:
     from backend.llm.catalog_summary import display_table_name, table_row_count
@@ -225,3 +229,32 @@ def get_schema() -> SchemaResponse:
         relationships=rels_out,
         warnings=top_warnings,
     )
+
+
+# DataSource endpoints (Sprint 3 / BI-09 / Issue #37)
+@router.post("/api/datasources/test", response_model=DataSourceTestResponse)
+@router.post("/datasources/test", response_model=DataSourceTestResponse)
+def test_datasource(body: DataSourceTestRequest) -> DataSourceTestResponse:
+    """Test connection to an external PostgreSQL database with read-only safeguards."""
+    return datasources.test_datasource(body)
+
+
+@router.get("/api/datasources", response_model=list[DataSourceResponse])
+@router.get("/datasources", response_model=list[DataSourceResponse])
+def get_datasources() -> list[DataSourceResponse]:
+    """List available datasources including default 'raw' dataset without leaking passwords."""
+    return datasources.get_all_datasources()
+
+
+@router.post("/api/datasources", response_model=DataSourceResponse)
+@router.post("/datasources", response_model=DataSourceResponse)
+def create_datasource(body: DataSourceCreateRequest) -> DataSourceResponse:
+    """Validate connection and register a new external PostgreSQL datasource."""
+    try:
+        return datasources.create_datasource(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to register datasource: {exc}"
+        ) from exc

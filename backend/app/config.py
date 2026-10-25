@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     schema_catalog_path: str = "data/schema-catalog.json"
     relationship_catalog_path: str = "data/relationship-catalog.json"
+    datasources_path: str = "data/datasources.json"
 
     llm_base_url: str = "http://127.0.0.1:11434/v1"
     llm_api_key: str = "not-needed"

@@ -212,26 +212,66 @@ def filter_catalog_for_scope(
     # 2. Check datasource_id if provided
     schema_name = catalog.get("schema") or "raw"
     matched_by_source = None
+    matched_ext_ds = None
     if datasource_id:
         ds_clean = datasource_id.strip()
         if ds_clean.lower() == schema_name.lower() or ds_clean.lower() == "default":
             # Entire schema datasource selected
             pass
         else:
-            # Check if datasource_id directly names a table
-            for t in tables:
-                if isinstance(t, dict) and match_table_name(t, ds_clean):
-                    matched_by_source = t
-                    break
-            if not matched_by_source:
+            # Check registered external datasources
+            try:
+                from .datasources import get_all_datasources
+
+                for ds in get_all_datasources():
+                    if ds.id != "raw" and ds.id.lower() == ds_clean.lower():
+                        matched_ext_ds = ds
+                        break
+            except Exception:
+                pass
+
+            if not matched_ext_ds:
+                # Check if datasource_id directly names a table in local schema
+                for t in tables:
+                    if isinstance(t, dict) and match_table_name(t, ds_clean):
+                        matched_by_source = t
+                        break
+                if not matched_by_source:
+                    return (
+                        None,
+                        None,
+                        f"Источник данных «{datasource_id}» не найден в каталоге данных. "
+                        f"Доступные таблицы: {available_str}.",
+                    )
+
+    # 3. Handle external datasource scoping
+    if matched_ext_ds is not None:
+        ext_tables = matched_ext_ds.tables or []
+        ext_tables_str = ", ".join(f"«{t}»" for t in ext_tables) if ext_tables else "нет таблиц"
+        if table_name:
+            t_clean = table_name.strip()
+            matched_t = next((t for t in ext_tables if t.lower() == t_clean.lower()), None)
+            if not matched_t:
                 return (
                     None,
                     None,
-                    f"Источник данных «{datasource_id}» не найден в каталоге данных. "
-                    f"Доступные таблицы: {available_str}."
+                    f"Таблица «{table_name}» не принадлежит источнику данных «{matched_ext_ds.name}». "
+                    f"Доступные таблицы: {ext_tables_str}.",
                 )
+            target_t_dict = {"name": matched_t, "display_name": matched_t, "columns": []}
+            ext_cat = {
+                "schema": matched_ext_ds.schema_name or matched_ext_ds.dbname,
+                "tables": [target_t_dict],
+            }
+            return ext_cat, None, None
+        else:
+            ext_cat = {
+                "schema": matched_ext_ds.schema_name or matched_ext_ds.dbname,
+                "tables": [{"name": t, "display_name": t, "columns": []} for t in ext_tables],
+            }
+            return ext_cat, None, None
 
-    # 3. Resolve target table
+    # 4. Resolve target table for local schema
     target_table = None
     if table_name:
         t_clean = table_name.strip()
