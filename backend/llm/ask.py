@@ -29,9 +29,11 @@ from collections import OrderedDict
 
 from . import compare as cmp
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int
-from .semantics import (MONEY, Intent, adjust_sql, check_sql, counted_noun,
-                        is_pure_view_request, money_formula, overlap, requested_view, same_word,
-                        strip_unmentioned_filters, strong_word, words)
+from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
+                        adjust_sql, check_destructive_mutation, check_money, check_sql,
+                        counted_noun, detect_ambiguous_query, detect_out_of_scope,
+                        is_pure_view_request, money_formula, overlap, requested_view,
+                        same_word, strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
 
@@ -39,10 +41,8 @@ MAX_ATTEMPTS = 3
 EXPLAIN_ROWS = 20
 
 # Просьбы изменить данные — повелительные формы («удали», «измени»), но не «изменилось».
-WRITE_INTENT = re.compile(
-    r"\b(удали(те)?|удалить|измени(те)?|изменить|обнови(те)?|обновить|перезапиши(те)?|"
-    r"очисти(те)?|очистить|вставь(те)?|добавь(те)?\s+(строк|запис)\w*|"
-    r"drop|delete|truncate|insert|update|alter)\b", re.IGNORECASE)
+WRITE_INTENT = MUTATION_PATTERN
+
 ANALYTIC_WORDS = re.compile(r"сколько|средн|сумм|доля|процент|динамик|\bтоп|самы|количеств|"
                             r"сравн|рост|паден|выручк|расход|итог|посчитай|распределен|"
                             r"по месяцам|по годам|больше всего|меньше всего|чаще|реже|"
@@ -547,8 +547,16 @@ def _values_for_all(runner, tables: list[dict]) -> dict:
     return values
 
 
-def _refuse(text: str) -> dict:
-    return {"answer": text, "sql": None}
+def _refuse(text: str, suggestions: list[str] | None = None) -> dict:
+    suggs = suggestions or DEFAULT_DATASET_SUGGESTIONS
+    formatted_answer = text
+    if not any(s in text for s in suggs):
+        formatted_answer = f"{text}\n\nВы можете запросить, например:\n" + "\n".join(f"- {s}" for s in suggs[:3])
+    return {
+        "answer": formatted_answer,
+        "sql": None,
+    }
+
 
 
 # ---------- основной сценарий ----------
@@ -591,9 +599,22 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                 question = f"{pending['question']} ({pending['units'][choice]})"
                 resolved_unit = True
 
-    if WRITE_INTENT.search(question):
-        return _refuse("Я работаю с данными только на чтение: могу считать и показывать, "
-                       "но не изменять и не удалять данные.")
+    # Проверка деструктивных действий (DDL/DML)
+    mutation_refusal = check_destructive_mutation(question)
+    if mutation_refusal:
+        return mutation_refusal.to_dict()
+
+    # Проверка запроса отсутствующих в датасете сущностей и метрик (NPS, ROI, LTV, ТВ-реклама и т.д.)
+    out_of_scope_refusal = detect_out_of_scope(question)
+    if out_of_scope_refusal:
+        return out_of_scope_refusal.to_dict()
+
+    # Неоднозначный / слишком обобщённый вопрос
+    ambiguous_refusal = detect_ambiguous_query(question)
+    if ambiguous_refusal:
+        trace["clarification"] = "ambiguous"
+        return ambiguous_refusal.to_dict()
+
 
     # 1. Только сменить вид прошлого результата («покажи кругом») — без модели
     last = state.get("last")
@@ -644,8 +665,17 @@ def answer_question(question: str, catalog: dict, runner, client=None,
             state["pending"] = {"kind": "table", "question": question, "options": options,
                                 "tables": [t["name"] for t in candidates]}
             trace["clarification"] = "table"
-            return {"answer": "Подходит несколько таблиц. Уточните, пожалуйста, по каким данным считать.",
-                    "clarification": {"question": "По каким данным считать?", "options": options}}
+            bullet_opts = "\n".join(f"- {opt}" for opt in options[:3])
+            return {
+                "answer": (
+                    "Подходит несколько таблиц. Уточните, пожалуйста, по каким данным считать:\n"
+                    f"{bullet_opts}"
+                ),
+                "chart": None,
+                "table": None,
+                "sql": None,
+                "clarification": {"question": "По каким данным считать?", "options": options},
+            }
 
     table_name = display_table_name(table["name"])
     trace["table"] = table["name"]
@@ -662,9 +692,18 @@ def answer_question(question: str, catalog: dict, runner, client=None,
             state["pending"] = {"kind": "unit", "question": question, "table": table["name"],
                                 "options": options, "units": [u for _, u in units]}
             trace["clarification"] = "unit"
-            return {"answer": "Уточните, пожалуйста, что именно посчитать: в этой таблице одна "
-                              "строка — это позиция, а не целая операция.",
-                    "clarification": {"question": "Что считать?", "options": options}}
+            bullet_units = "\n".join(f"- {opt}" for opt in options)
+            return {
+                "answer": (
+                    "Уточните, пожалуйста, что именно посчитать: в этой таблице одна "
+                    f"строка — это позиция, а не целая операция:\n{bullet_units}"
+                ),
+                "chart": None,
+                "table": None,
+                "sql": None,
+                "clarification": {"question": "Что считать?", "options": options},
+            }
+
 
     # 4. Сравнение периодов? Границы дат считает код.
     periods: list = []

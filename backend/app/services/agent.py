@@ -18,15 +18,35 @@ try:
     from backend.llm.ask import answer_question  # type: ignore
     from backend.llm.describe import describe_data  # type: ignore
     from backend.llm.sql_runner import PostgresRunner  # type: ignore
+    from backend.llm.semantics import (  # type: ignore
+        check_destructive_mutation,
+        detect_ambiguous_query,
+        detect_out_of_scope,
+    )
     HAS_LLM_MODULE = True
 except ImportError:
     try:
         from llm.ask import answer_question  # type: ignore
         from llm.describe import describe_data  # type: ignore
         from llm.sql_runner import PostgresRunner  # type: ignore
+        from llm.semantics import (  # type: ignore
+            check_destructive_mutation,
+            detect_ambiguous_query,
+            detect_out_of_scope,
+        )
         HAS_LLM_MODULE = True
     except ImportError:
         HAS_LLM_MODULE = False
+
+        def check_destructive_mutation(q: str):  # type: ignore
+            return None
+
+        def detect_out_of_scope(q: str):  # type: ignore
+            return None
+
+        def detect_ambiguous_query(q: str):  # type: ignore
+            return None
+
 
 
 class AgentServiceError(RuntimeError):
@@ -79,16 +99,21 @@ def is_describe_intent(question: str) -> bool:
         "что есть в данных",
         "что есть в этих данных",
         "что в этих данных",
+        "что это за данные",
+        "что за данные",
         "что передо мной",
         "что перед нами",
         "какие данные",
         "опиши данные",
         "описание данных",
+        "опиши таблицы",
         "какие таблицы",
         "список таблиц",
         "структура данных",
         "покажи таблицы",
         "расскажи о данных",
+        "расскажи про данные",
+        "обзор данных",
     ]
     return any(t in q for t in triggers)
 
@@ -105,8 +130,25 @@ def process_chat_message(
     Uses teammate's describe_data / answer_question when available,
     otherwise falls back to basic chat completion.
     """
+    # 1. Защита от деструктивных операций (DDL/DML)
+    mutation = check_destructive_mutation(message)
+    if mutation:
+        return mutation.to_dict()
+
+    # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете
+    out_of_scope = detect_out_of_scope(message)
+    if out_of_scope:
+        return out_of_scope.to_dict()
+
+    # 3. Слишком обобщённый / неоднозначный запрос (если не запрос описания данных)
+    if not is_describe_intent(message):
+        ambiguous = detect_ambiguous_query(message)
+        if ambiguous:
+            return ambiguous.to_dict()
+
     if HAS_LLM_MODULE:
         if catalog is None:
+
             catalog, loaded_rel = load_catalogs()
             if relationships is None:
                 relationships = loaded_rel
@@ -146,7 +188,14 @@ def process_chat_message(
                 raise AgentServiceError(f"Не удалось подключиться к базе данных под bi_reader: {exc}") from exc
 
         try:
-            return answer_question(message, catalog, runner, session_id=session_id)
+            res = answer_question(message, catalog, runner, session_id=session_id)
+            return {
+                "answer": res.get("answer", ""),
+                "chart": res.get("chart"),
+                "table": res.get("table"),
+                "sql": res.get("sql"),
+                "clarification": res.get("clarification"),
+            }
         except Exception as exc:
             raise AgentServiceError(f"Ошибка при ответе на вопрос: {exc}") from exc
         finally:
@@ -168,7 +217,18 @@ def process_chat_message(
 
 def answer(question: str, session_id: str | None = None) -> str:
     """Generate an analytical response for a user question using the LLM."""
+    mutation = check_destructive_mutation(question)
+    if mutation:
+        return mutation.to_dict()["answer"]
+    out_of_scope = detect_out_of_scope(question)
+    if out_of_scope:
+        return out_of_scope.to_dict()["answer"]
+    ambiguous = detect_ambiguous_query(question)
+    if ambiguous:
+        return ambiguous.to_dict()["answer"]
+
     if session_id:
+
         history = _SESSION_HISTORY.setdefault(
             session_id, [{"role": "system", "content": SYSTEM_PROMPT}]
         )

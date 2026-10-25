@@ -149,5 +149,207 @@ class EvalRunnerSmokeTest(unittest.TestCase):
         self.assertEqual([r["ok"] for r in report], [True, True, True], report)
 
 
+class UnsupportedMetricsTests(unittest.TestCase):
+    """Тесты распознавания отсутствующих в датасете сущностей и метрик (BI-05, Issue #33)."""
+
+    def test_nps_detected(self):
+        from backend.llm.semantics import detect_out_of_scope
+        for phrase in [
+            "Какой средний NPS у наших клиентов?",
+            "Посчитай индекс лояльности",
+            "Какой показатель NPS за прошлый месяц?",
+            "Оценка готовности рекомендовать",
+        ]:
+            info = detect_out_of_scope(phrase)
+            self.assertIsNotNone(info, f"Failed on {phrase}")
+            self.assertEqual(info.topic, "nps")
+            self.assertIn("NPS", info.explanation)
+            self.assertGreaterEqual(len(info.suggestions), 2)
+            d = info.to_dict()
+            self.assertIn("NPS", d["answer"])
+            self.assertIsNone(d["sql"])
+            self.assertIsNone(d["table"])
+            self.assertIsNone(d["chart"])
+
+    def test_roi_detected(self):
+        from backend.llm.semantics import detect_out_of_scope
+        for phrase in [
+            "Посчитай ROI рекламных кампаний",
+            "Какой ROMI по площадкам?",
+            "Какая окупаемость инвестиций в рекламу?",
+            "Покажи ROAS",
+        ]:
+            info = detect_out_of_scope(phrase)
+            self.assertIsNotNone(info, f"Failed on {phrase}")
+            self.assertEqual(info.topic, "roi")
+            self.assertIn("ROI", info.explanation)
+            self.assertGreaterEqual(len(info.suggestions), 2)
+
+    def test_ltv_detected(self):
+        from backend.llm.semantics import detect_out_of_scope
+        for phrase in [
+            "Покажи LTV покупателей",
+            "Какой средний CLV клиента?",
+            "Какая пожизненная ценность клиента?",
+        ]:
+            info = detect_out_of_scope(phrase)
+            self.assertIsNotNone(info, f"Failed on {phrase}")
+            self.assertEqual(info.topic, "ltv")
+            self.assertIn("LTV", info.explanation)
+            self.assertGreaterEqual(len(info.suggestions), 2)
+
+    def test_tv_advertising_detected(self):
+        from backend.llm.semantics import detect_out_of_scope
+        for phrase in [
+            "Какая эффективность рекламы на ТВ?",
+            "Сколько потратили на ТВ?",
+            "Сколько потратили на ТВ-рекламу?",
+            "Реклама на телевидении по регионам",
+            "Покажи расходы на радио-рекламу",
+            "Сколько стоили билборды?",
+        ]:
+            info = detect_out_of_scope(phrase)
+            self.assertIsNotNone(info, f"Failed on {phrase}")
+            self.assertEqual(info.topic, "tv_ads")
+            self.assertIn("ТВ", info.explanation)
+            self.assertGreaterEqual(len(info.suggestions), 2)
+
+    def test_salaries_and_inventory_detected(self):
+        from backend.llm.semantics import detect_out_of_scope
+        for sal_phrase in [
+            "Какая зарплата у сотрудников?",
+            "Какой фонд оплаты труда?",
+            "Какие премии выплачены?",
+        ]:
+            info_sal = detect_out_of_scope(sal_phrase)
+            self.assertIsNotNone(info_sal, f"Failed on salary: {sal_phrase}")
+            self.assertEqual(info_sal.topic, "salary")
+            self.assertIn("заработной плате", info_sal.explanation)
+
+        for inv_phrase in [
+            "Какие остатки на складе?",
+            "Сколько товаров на складе?",
+            "Какие складские остатки?",
+        ]:
+            info_inv = detect_out_of_scope(inv_phrase)
+            self.assertIsNotNone(info_inv, f"Failed on inventory: {inv_phrase}")
+            self.assertEqual(info_inv.topic, "inventory")
+            self.assertIn("складских остатков", info_inv.explanation)
+
+    def test_valid_queries_not_flagged_as_out_of_scope(self):
+        from backend.llm.semantics import detect_out_of_scope
+        valid = [
+            "Сколько потратили на рекламу по площадкам?",
+            "Какая выручка с учётом скидки по каналам продаж?",
+            "Сколько уникальных покупателей в продажах?",
+            "Сколько обращений в техподдержку по каждому каналу?",
+            "Какие средние фактические трудозатраты в часах по типам задач?",
+            "Сколько премиум клиентов совершили покупки?",
+            "Какая выручка в премиальном сегменте?",
+        ]
+        for q in valid:
+            self.assertIsNone(detect_out_of_scope(q), f"False positive out-of-scope on: {q}")
+
+
+class DestructiveMutationTests(unittest.TestCase):
+    """Тесты блокировки попыток изменения или удаления данных (DDL/DML) (BI-05, Issue #33)."""
+
+    def test_ddl_and_dml_blocked(self):
+        from backend.llm.semantics import check_destructive_mutation
+        dangerous = [
+            "DROP TABLE data_01_Продажи",
+            "DELETE FROM data_01_Продажи WHERE 1=1",
+            "UPDATE data_01_Продажи SET status = 'deleted'",
+            "ALTER TABLE data_01_Продажи DROP COLUMN price",
+            "INSERT INTO data_01_Продажи VALUES ('1', '2')",
+            "TRUNCATE TABLE data_01_Продажи",
+            "TRUNCATE data_01_Продажи",
+            "CREATE TABLE test (id int)",
+            "GRANT ALL PRIVILEGES ON DATABASE bi TO hacker",
+            "Удали все записи о продажах",
+            "Очисти таблицу доставок",
+            "Сотри все данные из таблицы продаж",
+            "Дропни таблицу",
+            "Снеси все записи",
+            "Обнови статус обращений в таблице",
+            "Вставь новую строку в данные",
+            "SELECT * FROM sales; DROP TABLE sales",
+        ]
+        for cmd in dangerous:
+            refusal = check_destructive_mutation(cmd)
+            self.assertIsNotNone(refusal, f"Failed to block mutation: {cmd}")
+            self.assertEqual(refusal.topic, "mutation_rejected")
+            self.assertIn("только на чтение", refusal.explanation)
+            self.assertIn("запрещены", refusal.explanation)
+            self.assertGreaterEqual(len(refusal.suggestions), 2)
+            d = refusal.to_dict()
+            self.assertIsNone(d["sql"])
+            self.assertIsNone(d["table"])
+            self.assertIsNone(d["chart"])
+            self.assertIn("только на чтение", d["answer"])
+
+    def test_legitimate_analytical_queries_not_blocked(self):
+        from backend.llm.semantics import check_destructive_mutation
+        safe = [
+            "Как изменилась выручка по сравнению с 2024?",
+            "Как изменилось количество проданных штук в 2025 году по сравнению с 2024?",
+            "Какая выручка по каналам продаж?",
+            "Сколько было операций возврата?",
+            "Какой drop rate у пользователей в воронке?",
+            "Когда был последний update базы?",
+        ]
+        for q in safe:
+            self.assertIsNone(check_destructive_mutation(q), f"False positive mutation block on: {q}")
+
+
+class AmbiguousQueryTests(unittest.TestCase):
+    """Тесты обработки неоднозначных и слишком общих запросов (BI-05, Issue #33)."""
+
+    def test_ambiguous_queries_detected(self):
+        from backend.llm.semantics import detect_ambiguous_query
+        vague = [
+            "Покажи метрики",
+            "Какая статистика?",
+            "Сделай сводку",
+            "Покажи отчет",
+            "Покажи аналитику",
+            "Что с эффективностью?",
+            "Дай данные",
+            "Покажи все метрики",
+            "Покажи основные показатели",
+            "Общая статистика",
+            "Сводка по данным",
+            "Что с эффективностью бизнеса?",
+            "Какая общая аналитика?",
+            "Метрики",
+            "Отчет",
+            "Показатели",
+        ]
+        for q in vague:
+            refusal = detect_ambiguous_query(q)
+            self.assertIsNotNone(refusal, f"Failed to detect ambiguity in: {q}")
+            self.assertEqual(refusal.topic, "ambiguous_query")
+            self.assertIn("слишком обобщённо", refusal.explanation)
+            self.assertIsNotNone(refusal.clarification)
+            self.assertGreaterEqual(len(refusal.clarification["options"]), 2)
+            d = refusal.to_dict()
+            self.assertIsNone(d["sql"])
+            self.assertIsNone(d["table"])
+            self.assertIsNone(d["chart"])
+            self.assertIsNotNone(d["clarification"])
+
+    def test_specific_queries_not_flagged_as_ambiguous(self):
+        from backend.llm.semantics import detect_ambiguous_query
+        specific = [
+            "Какая выручка по каналам продаж?",
+            "Сколько обращений в техподдержку?",
+            "Топ-5 городов по количеству проданных штук",
+            "Сколько кликов по рекламе?",
+        ]
+        for q in specific:
+            self.assertIsNone(detect_ambiguous_query(q), f"False positive ambiguity on: {q}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
