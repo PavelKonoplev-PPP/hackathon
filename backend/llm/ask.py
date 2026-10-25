@@ -28,7 +28,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from . import compare as cmp
-from .catalog_summary import TYPE_LABELS, display_table_name, format_int
+from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
                         adjust_sql, check_destructive_mutation, check_money, check_sql,
                         counted_noun, detect_ambiguous_query, detect_out_of_scope,
@@ -212,6 +212,10 @@ def choose_table(question: str, tables: list[dict], values_by_table: dict) -> tu
     analytic = bool(ANALYTIC_WORDS.search(question))
     # «Какая погода в Москве?» — совпало только значение «Москва», а вопрос не аналитический
     if best == 0 or (not analytic and max(structural) == 0):
+        if len(tables) == 1:
+            if analytic or best > 0:
+                return tables[0], []
+            return None, []
         if analytic:
             return None, tables  # аналитический вопрос без зацепок — спросим, о каких данных
         return None, []
@@ -563,7 +567,8 @@ def _refuse(text: str, suggestions: list[str] | None = None) -> dict:
 
 def answer_question(question: str, catalog: dict, runner, client=None,
                     progress=None, trace: dict | None = None,
-                    session_id: str | None = None) -> dict:
+                    session_id: str | None = None,
+                    table_name: str | None = None) -> dict:
     """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification.
 
     runner — объект с методами run(table, sql) и category_values(table),
@@ -571,6 +576,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     trace — необязательный словарь; в него пишутся детали (таблица, SQL, сырые
     строки результата, попытки, ошибки) — для тестов точности и отладки.
     session_id — идентификатор диалога: включает память (уточнения и продолжения).
+    table_name — опциональное имя активной таблицы для сужения контекста запроса.
     """
     trace = trace if trace is not None else {}
     trace["errors"] = []
@@ -580,6 +586,27 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         client = LLMClient()
     state = _session(session_id)
     tables = catalog.get("tables") or []
+
+    if table_name:
+        t_clean = table_name.strip()
+        matched = []
+        for t in tables:
+            if match_table_name(t, t_clean):
+                matched.append(t)
+                break
+        if not matched:
+            available = [display_table_name(t.get("name", "")) for t in tables]
+            available_str = ", ".join(f"«{n}»" for n in available if n)
+            return {
+                "answer": f"Таблица «{table_name}» не найдена в каталоге данных. Доступные таблицы: {available_str}.",
+                "chart": None,
+                "table": None,
+                "sql": None,
+                "clarification": None,
+            }
+        tables = matched
+        catalog = {**catalog, "tables": tables}
+
     by_name = {t["name"]: t for t in tables}
     question = question.strip()
 
@@ -609,11 +636,12 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if out_of_scope_refusal:
         return out_of_scope_refusal.to_dict()
 
-    # Неоднозначный / слишком обобщённый вопрос
-    ambiguous_refusal = detect_ambiguous_query(question)
-    if ambiguous_refusal:
-        trace["clarification"] = "ambiguous"
-        return ambiguous_refusal.to_dict()
+    # Неоднозначный / слишком обобщённый вопрос (только если таблица не зафиксирована)
+    if not (table_name or len(tables) == 1):
+        ambiguous_refusal = detect_ambiguous_query(question)
+        if ambiguous_refusal:
+            trace["clarification"] = "ambiguous"
+            return ambiguous_refusal.to_dict()
 
 
     # 1. Только сменить вид прошлого результата («покажи кругом») — без модели

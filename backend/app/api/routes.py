@@ -66,7 +66,12 @@ def ask(body: AskRequest) -> AskResponse:
 def chat_endpoint(body: ChatRequest) -> ChatResponse:
     """Frontend-compatible chat endpoint adhering to docs/api-contract.md."""
     try:
-        result = agent.process_chat_message(body.message, session_id=body.session_id)
+        result = agent.process_chat_message(
+            body.message,
+            session_id=body.session_id,
+            datasource_id=body.datasource_id,
+            table_name=body.table_name,
+        )
         return ChatResponse(**result)
     except (LLMError, agent.AgentServiceError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

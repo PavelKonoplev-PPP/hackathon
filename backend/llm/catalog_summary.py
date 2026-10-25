@@ -60,6 +60,42 @@ def display_table_name(name: str) -> str:
     return name
 
 
+def match_table_name(table: dict, target: str) -> bool:
+    """Check if table matches target string by raw name, display name, prefix, or code."""
+    raw = (table.get("name") or "").strip()
+    disp = display_table_name(raw).strip()
+    q = target.strip()
+    if not q or not raw:
+        return False
+    if raw == q or disp == q:
+        return True
+    q_lower = q.lower()
+    raw_lower = raw.lower()
+    disp_lower = disp.lower()
+    if raw_lower == q_lower or disp_lower == q_lower:
+        return True
+    if raw_lower.replace("_", " ") == q_lower.replace("_", " "):
+        return True
+    if disp_lower.replace("_", " ") == q_lower.replace("_", " "):
+        return True
+    if q_lower.startswith("raw."):
+        q_no_schema = q_lower[4:]
+        if raw_lower == q_no_schema or disp_lower == q_no_schema:
+            return True
+    if raw_lower.startswith("data_") and raw_lower[5:] == q_lower:
+        return True
+    parts = raw_lower.split("_", 2)
+    if len(parts) >= 2 and parts[1].isdigit():
+        code = f"data_{parts[1]}"
+        num = parts[1]
+        num_int = str(int(parts[1]))
+        if q_lower in (code, num, num_int, f"data_{num_int}"):
+            return True
+        if q_lower.startswith(code + "_"):
+            return True
+    return False
+
+
 def _column_note(col: dict) -> str:
     kind = col.get("inferred_type") or "unknown"
     label = TYPE_LABELS.get(kind, kind)

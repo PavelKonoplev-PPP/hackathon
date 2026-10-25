@@ -89,6 +89,61 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("Качество данных", answer)
         self.assertTrue(answer.rstrip().endswith("1. Вопрос?"))
 
+    def test_describe_with_active_table_name_filters_to_single_table(self):
+        multi_cat = {
+            "schema": "raw",
+            "tables": [
+                {
+                    "name": "data_01_Продажи",
+                    "estimated_total_rows": 500000,
+                    "columns": [{"name": "Цена", "inferred_type": "decimal"}],
+                },
+                {
+                    "name": "data_02_Доставка",
+                    "estimated_total_rows": 100000,
+                    "columns": [{"name": "Город", "inferred_type": "category"}],
+                },
+            ],
+        }
+        client = FakeClient()
+        result = describe_data(multi_cat, client=client, table_name="data_02_Доставка")
+        # 1 call for single table + 1 call for overview
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn("Город", client.calls[0][1]["content"])
+        self.assertEqual(len(result["table"]["rows"]), 1)
+        self.assertEqual(result["table"]["rows"][0][0], "Доставка")
+        self.assertIn("1. «Доставка» — Таблица о продажах.", result["answer"])
+
+    def test_describe_with_invalid_table_name_returns_polite_message(self):
+        client = FakeClient()
+        result = describe_data(catalog(), client=client, table_name="nonexistent_xyz")
+        self.assertIn("не найдена в каталоге данных", result["answer"])
+        self.assertIn("«Продажи»", result["answer"])
+        self.assertIsNone(result["table"])
+
+    def test_match_table_name_variations(self):
+        from backend.llm.catalog_summary import match_table_name
+
+        tbl = {"name": "data_01_Продажи"}
+        self.assertTrue(match_table_name(tbl, "data_01_Продажи"))
+        self.assertTrue(match_table_name(tbl, "Продажи"))
+        self.assertTrue(match_table_name(tbl, "продажи"))
+        self.assertTrue(match_table_name(tbl, "data_01"))
+        self.assertTrue(match_table_name(tbl, "01"))
+        self.assertTrue(match_table_name(tbl, "1"))
+        self.assertTrue(match_table_name(tbl, "01_Продажи"))
+        self.assertTrue(match_table_name(tbl, "raw.data_01_Продажи"))
+        # Must not match common table prefix 'data'
+        self.assertFalse(match_table_name(tbl, "data"))
+        self.assertFalse(match_table_name(tbl, "несуществующая"))
+
+        tbl2 = {"name": "data_02_Техническая_поддержка"}
+        self.assertTrue(match_table_name(tbl2, "Техническая поддержка"))
+        self.assertTrue(match_table_name(tbl2, "Техническая_поддержка"))
+        self.assertTrue(match_table_name(tbl2, "data_02"))
+
+
+
 
 class ShortenTests(unittest.TestCase):
     def test_two_sentences_and_no_name_repeat(self):

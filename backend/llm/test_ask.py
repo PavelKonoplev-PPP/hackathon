@@ -417,6 +417,181 @@ class AnswerTests(unittest.TestCase):
         result, _, _ = ask("А теперь только мобильное приложение", [GOOD_SQL, GOOD_TEXT])
         self.assertNotIn("clarification", result)
 
+    def test_answer_question_with_active_table_name_scopes_query_and_sql(self):
+        runner = FakeRunner(columns=["Перевозчик", "Количество"], rows=[("Курьер", 50)])
+        delivery_sql = '```sql\nSELECT "Перевозчик", COUNT(*) AS "Количество" FROM t GROUP BY 1\n```'
+        client = ScriptedClient([delivery_sql, "Больше всего доставок курьером: 50."])
+        trace = {}
+        result = answer_question(
+            "Сколько записей?",
+            CATALOG,
+            runner,
+            client=client,
+            trace=trace,
+            table_name="data_02_Доставка",
+        )
+        self.assertEqual(trace["table"], "data_02_Доставка")
+        # LLM SQL prompt must only see data_02_Доставка columns
+        sql_prompt = client.calls[0][0]["content"]
+        self.assertIn('"Перевозчик"', sql_prompt)
+        self.assertNotIn('"Канал продажи"', sql_prompt)
+        self.assertEqual(result["table"]["rows"][0], ["Курьер", "50"])
+
+    def test_answer_question_with_invalid_table_name_returns_polite_message(self):
+        runner = FakeRunner()
+        client = ScriptedClient([])
+        result = answer_question(
+            "Сколько записей?",
+            CATALOG,
+            runner,
+            client=client,
+            table_name="unknown_table",
+        )
+        self.assertIn("не найдена в каталоге данных", result["answer"])
+        self.assertIn("«Продажи»", result["answer"])
+        self.assertIn("«Доставка»", result["answer"])
+        self.assertIsNone(result["sql"])
+        self.assertEqual(len(client.calls), 0)
+
+    def test_answer_question_with_value_query_scoped_table(self):
+        """Issue #40: value-based query with scoped table must not be rejected as unanalytic."""
+        runner = FakeRunner(columns=["Канал продажи", "Цена, руб."], rows=[("Мобильное приложение", 1500)])
+        sql = '```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t WHERE "Канал продажи" = \'Мобильное приложение\' GROUP BY 1\n```'
+        client = ScriptedClient([sql, "Выручка в мобильном приложении: 1 500 руб."])
+        trace = {}
+        result = answer_question(
+            "Какая ситуация в мобильном приложении?",
+            CATALOG,
+            runner,
+            client=client,
+            trace=trace,
+            table_name="data_01_Продажи",
+        )
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertIsNotNone(result["sql"])
+        self.assertIn("1 500", result["answer"])
+
+    def test_answer_question_multi_turn_with_table_scope(self):
+        """Issue #40: multi-turn follow-ups stay scoped to table, but switching table resets previous."""
+        runner = FakeRunner()
+        # Turn 1 on data_01_Продажи
+        sql1 = '```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t GROUP BY 1\n```'
+        client1 = ScriptedClient([sql1, "Выручка по каналам."])
+        res1 = answer_question(
+            "Какая выручка по каналам продаж?",
+            CATALOG,
+            runner,
+            client=client1,
+            session_id="multi-turn-scope",
+            table_name="data_01_Продажи",
+        )
+        self.assertIsNotNone(res1["sql"])
+
+        # Turn 2: Followup on same table
+        sql2 = '```sql\nSELECT "Канал продажи", SUM("Цена, руб.") FROM t WHERE "Канал продажи" = \'Мобильное приложение\' GROUP BY 1\n```'
+        client2 = ScriptedClient([sql2, "Только мобильное приложение."])
+        trace2 = {}
+        res2 = answer_question(
+            "А теперь только мобильное приложение",
+            CATALOG,
+            runner,
+            client=client2,
+            trace=trace2,
+            session_id="multi-turn-scope",
+            table_name="data_01_Продажи",
+        )
+        self.assertIsNotNone(res2["sql"])
+        # Should have referenced previous query in prompt
+        self.assertTrue(any("Уточнение к предыдущему вопросу" in m["content"] for m in client2.calls[0]))
+
+        # Turn 3: Switch table to data_02_Доставка -> previous table query must not be reused
+        sql3 = '```sql\nSELECT "Перевозчик", COUNT(*) FROM t GROUP BY 1\n```'
+        client3 = ScriptedClient([sql3, "Доставки по перевозчикам."])
+        res3 = answer_question(
+            "Сколько записей по перевозчикам?",
+            CATALOG,
+            runner,
+            client=client3,
+            session_id="multi-turn-scope",
+            table_name="data_02_Доставка",
+        )
+        self.assertIsNotNone(res3["sql"])
+        # Must not contain previous "Продажи" query as previous
+        self.assertFalse(any("Какая выручка по каналам продаж?" in m["content"] for m in client3.calls[0]))
+
+    def test_filter_catalog_for_scope_helper(self):
+        try:
+            from backend.app.services.agent import filter_catalog_for_scope
+        except ImportError:
+            from app.services.agent import filter_catalog_for_scope
+
+        cat = {
+            "schema": "raw",
+            "summary": {"tables": 2, "columns": 10},
+            "tables": [
+                {"name": "data_01_Продажи", "columns": [{"name": "Код позиции"}]},
+                {"name": "data_02_Доставка", "columns": [{"name": "Код доставки"}]},
+            ],
+        }
+        rel = {
+            "join_candidates": [
+                {
+                    "source": {"table": "data_01_Продажи", "column": "Код исходной позиции"},
+                    "target": {"table": "data_01_Продажи", "column": "Код позиции"},
+                },
+                {
+                    "source": {"table": "data_01_Продажи", "column": "Код доставки"},
+                    "target": {"table": "data_02_Доставка", "column": "Код доставки"},
+                },
+            ]
+        }
+
+        # 1. Scope by display name
+        filt_cat, filt_rel, err = filter_catalog_for_scope(cat, rel, table_name="Продажи")
+        self.assertIsNone(err)
+        self.assertEqual(len(filt_cat["tables"]), 1)
+        self.assertEqual(filt_cat["tables"][0]["name"], "data_01_Продажи")
+        self.assertEqual(filt_cat["summary"]["tables"], 1)
+        # Cross-table join must be stripped, only intra-table self-ref kept
+        self.assertEqual(len(filt_rel["join_candidates"]), 1)
+        self.assertEqual(filt_rel["join_candidates"][0]["target"]["table"], "data_01_Продажи")
+
+        # 2. Scope by raw name
+        filt_cat2, _, err2 = filter_catalog_for_scope(cat, rel, table_name="data_02_Доставка")
+        self.assertIsNone(err2)
+        self.assertEqual(filt_cat2["tables"][0]["name"], "data_02_Доставка")
+
+        # 3. Invalid table name
+        _, _, err3 = filter_catalog_for_scope(cat, rel, table_name="несуществующая")
+        self.assertIsNotNone(err3)
+        self.assertIn("не найдена в каталоге данных", err3)
+
+        # 4. Scope omitted (backward compatibility)
+        full_cat, full_rel, err4 = filter_catalog_for_scope(cat, rel)
+        self.assertIsNone(err4)
+        self.assertEqual(len(full_cat["tables"]), 2)
+        self.assertEqual(len(full_rel["join_candidates"]), 2)
+
+        # 5. Invalid datasource_id even when table_name is given
+        _, _, err5 = filter_catalog_for_scope(
+            cat, rel, table_name="data_01_Продажи", datasource_id="invalid_ds"
+        )
+        self.assertIsNotNone(err5)
+        self.assertIn("не найден в каталоге данных", err5)
+
+        # 6. Conflicting datasource_id and table_name
+        _, _, err6 = filter_catalog_for_scope(
+            cat, rel, table_name="data_01_Продажи", datasource_id="data_02_Доставка"
+        )
+        self.assertIsNotNone(err6)
+        self.assertIn("не принадлежит источнику данных", err6)
+
+        # 7. Common prefix 'data' must NOT match data_01_Продажи
+        _, _, err7 = filter_catalog_for_scope(cat, rel, table_name="data")
+        self.assertIsNotNone(err7)
+        self.assertIn("не найдена в каталоге данных", err7)
+
+
 
 if __name__ == "__main__":
     unittest.main()
