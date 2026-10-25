@@ -1,19 +1,25 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
+import psycopg
 
 try:
     from backend.app.api import routes
+    from backend.app.config import get_settings
     from backend.app.db import session as db_session
     from backend.app.llm.client import LLMError
     from backend.app.main import app
-    from backend.app.services import agent
+    from backend.app.services import agent, datasources
 except ImportError:
     from app.api import routes
+    from app.config import get_settings
     from app.db import session as db_session
     from app.llm.client import LLMError
     from app.main import app
-    from app.services import agent
+    from app.services import agent, datasources
 
 
 class ApiTests(unittest.TestCase):
@@ -640,8 +646,578 @@ class ApiTests(unittest.TestCase):
         # Full catalog has 9 tables
         self.assertEqual(len(passed_cat["tables"]), 9)
 
+    # -------------------------------------------------------------------------
+    # Sprint 3: [BI-09] Issue #37 — External PostgreSQL Datasources Tests
+    # -------------------------------------------------------------------------
+
+    @patch("psycopg.connect")
+    def test_datasource_test_connection_success_mocked(self, mock_connect: MagicMock) -> None:
+        """Issue #37 / BI-09: POST /api/datasources/test returns success with discovered tables."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [("orders",), ("products",), ("users",)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_connect.return_value.__enter__.return_value = mock_conn
+
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "postgres.internal",
+                "port": 5432,
+                "dbname": "analytics_db",
+                "user": "bi_reader",
+                "password": "secret_password",
+                "schema_name": "public",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["success"])
+        self.assertEqual(data["tables_count"], 3)
+        self.assertEqual(data["tables"], ["orders", "products", "users"])
+        self.assertGreaterEqual(data["latency_ms"], 0.0)
+        self.assertIn("Успешное подключение", data["message"])
+        self.assertNotIn("secret_password", response.text)
+
+    @patch("psycopg.connect")
+    def test_datasource_test_connection_failure_bad_credentials(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Issue #37 / BI-09: Connection failure returns error status without leaking password."""
+        mock_connect.side_effect = psycopg.OperationalError(
+            "password authentication failed for user 'bi_reader' with password 'super_secret_pwd_999'"
+        )
+
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "postgres.internal",
+                "port": 5432,
+                "dbname": "analytics_db",
+                "user": "bi_reader",
+                "password": "super_secret_pwd_999",
+                "schema_name": "public",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "error")
+        self.assertFalse(data["success"])
+        self.assertEqual(data["tables_count"], 0)
+        self.assertEqual(data["tables"], [])
+        self.assertNotIn("super_secret_pwd_999", response.text)
+        self.assertIn("Ошибка подключения к PostgreSQL", data["message"])
+
+    @patch("psycopg.connect")
+    def test_datasource_test_connection_timeout(self, mock_connect: MagicMock) -> None:
+        """Issue #37 / BI-09: Connection timeout returns structured error response."""
+        mock_connect.side_effect = psycopg.OperationalError(
+            "connection to server at '192.0.2.1' port 5432 failed: timeout expired"
+        )
+
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "192.0.2.1",
+                "port": 5432,
+                "dbname": "unreachable_db",
+                "user": "reader",
+                "password": "pwd",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "error")
+        self.assertFalse(data["success"])
+        self.assertEqual(data["tables_count"], 0)
+        self.assertEqual(data["tables"], [])
+
+    @patch("psycopg.connect")
+    def test_datasource_test_readonly_and_timeout_options_enforced(
+        self, mock_connect: MagicMock
+    ) -> None:
+        """Issue #37 / BI-09: psycopg.connect must strictly enforce read-only and 3s timeout."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_connect.return_value.__enter__.return_value = mock_conn
+
+        self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "localhost",
+                "port": 5432,
+                "dbname": "test_db",
+                "user": "bi_reader",
+                "password": "pwd",
+            },
+        )
+        mock_connect.assert_called_once()
+        kwargs = mock_connect.call_args[1]
+        self.assertEqual(kwargs.get("connect_timeout"), 3)
+        self.assertTrue(kwargs.get("autocommit"))
+        options = kwargs.get("options", "")
+        self.assertIn("default_transaction_read_only=on", options)
+
+    def test_datasources_list_returns_default_raw_with_masked_password(self) -> None:
+        """Issue #37 / BI-09: GET /api/datasources returns default 'raw' dataset with masked password."""
+        response = self.client.get("/api/datasources")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsInstance(data, list)
+        self.assertGreaterEqual(len(data), 1)
+
+        raw_ds = next((ds for ds in data if ds.get("id") == "raw"), None)
+        self.assertIsNotNone(raw_ds)
+        self.assertEqual(raw_ds["id"], "raw")
+        self.assertTrue(raw_ds["is_default"])
+        self.assertEqual(raw_ds["password"], "******")
+        self.assertEqual(raw_ds["type"], "postgresql")
+
+        # Verify real password from settings is NEVER leaked in list response
+        settings = get_settings()
+        if settings.postgres_password:
+            self.assertNotIn(settings.postgres_password, response.text)
+        if settings.postgres_reader_password:
+            self.assertNotIn(settings.postgres_reader_password, response.text)
+
+    def test_datasources_list_endpoint_alias_without_api(self) -> None:
+        """Issue #37 / BI-09: GET /datasources alias functions identical to GET /api/datasources."""
+        response = self.client.get("/datasources")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+
+    def test_datasource_create_persists_to_file_and_masks_password(self) -> None:
+        """Issue #37 / BI-09: POST /api/datasources validates and writes to persistent storage."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(True, 8.5, ["orders", "customers"], "OK"),
+                ) as mock_test:
+                    response = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "name": "Новый Маркетинговый Источник",
+                            "host": "marketing.pg.company",
+                            "port": 5432,
+                            "dbname": "marketing_db",
+                            "user": "marketing_reader",
+                            "password": "secret_vault_token_456",
+                            "schema_name": "public",
+                            "description": "Источник маркетинговых данных",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    created = response.json()
+                    self.assertEqual(created["name"], "Новый Маркетинговый Источник")
+                    self.assertEqual(created["password"], "******")
+                    self.assertEqual(created["tables_count"], 2)
+                    self.assertEqual(created["tables"], ["orders", "customers"])
+                    self.assertFalse(created["is_default"])
+                    self.assertNotIn("secret_vault_token_456", response.text)
+
+                    # Verify persistence in temporary file
+                    self.assertTrue(temp_file.is_file())
+                    saved_data = json.loads(temp_file.read_text(encoding="utf-8"))
+                    self.assertEqual(len(saved_data), 1)
+                    self.assertEqual(saved_data[0]["id"], created["id"])
+                    self.assertEqual(saved_data[0]["name"], "Новый Маркетинговый Источник")
+                    self.assertEqual(saved_data[0]["password"], "secret_vault_token_456")
+
+                    # Verify GET /api/datasources returns both raw and the new source
+                    get_resp = self.client.get("/api/datasources")
+                    self.assertEqual(get_resp.status_code, 200)
+                    all_ds = get_resp.json()
+                    self.assertEqual(len(all_ds), 2)
+                    self.assertNotIn("secret_vault_token_456", get_resp.text)
+                    self.assertTrue(all(d["password"] == "******" for d in all_ds))
+
+    def test_datasource_create_failure_returns_400_and_does_not_persist(self) -> None:
+        """Issue #37 / BI-09: POST /api/datasources returns HTTP 400 when connection test fails."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(False, 15.0, [], "Не удалось подключиться: Connection refused"),
+                ):
+                    response = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "name": "Недоступный Источник",
+                            "host": "dead.host.net",
+                            "dbname": "test_db",
+                            "user": "bi_reader",
+                            "password": "pwd",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("Не удалось подключиться", response.json()["detail"])
+                    # Check file was NOT created
+                    self.assertFalse(temp_file.is_file())
+
+    def test_datasource_alias_normalization(self) -> None:
+        """Issue #37 / BI-09: database and username aliases are accepted in request payload."""
+        with patch.object(
+            datasources,
+            "test_postgres_connection",
+            return_value=(True, 5.0, ["tbl"], "OK"),
+        ) as mock_test:
+            response = self.client.post(
+                "/api/datasources/test",
+                json={
+                    "host": "localhost",
+                    "database": "aliased_db",
+                    "username": "aliased_user",
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            mock_test.assert_called_once()
+            call_kwargs = mock_test.call_args[1]
+            self.assertEqual(call_kwargs["dbname"], "aliased_db")
+            self.assertEqual(call_kwargs["user"], "aliased_user")
+
+    def test_datasource_live_local_postgres_connection(self) -> None:
+        """Issue #37 / BI-09: Live probe against local PostgreSQL verifies real table discovery."""
+        settings = get_settings()
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": settings.postgres_host,
+                "port": settings.postgres_port,
+                "dbname": settings.postgres_db,
+                "user": settings.postgres_reader_user,
+                "password": settings.reader_password,
+                "schema_name": settings.postgres_schema,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        if data["status"] == "ok":
+            self.assertEqual(data["tables_count"], 9)
+            self.assertTrue(any("Продажи" in t for t in data["tables"]))
+            self.assertGreater(data["latency_ms"], 0.0)
+
+    def test_datasource_test_empty_host_rejected(self) -> None:
+        """Issue #37: Empty host is rejected with HTTP 422 Unprocessable Entity."""
+        response = self.client.post(
+            "/api/datasources/test",
+            json={"host": "", "dbname": "db", "user": "usr"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_datasource_create_duplicate_id_updates_existing(self) -> None:
+        """Issue #37: Registering with existing ID updates configuration without duplicating."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(True, 10.0, ["t1"], "OK"),
+                ):
+                    # 1. Create initial datasource
+                    r1 = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "id": "my_custom_id",
+                            "name": "First Name",
+                            "host": "h1",
+                            "dbname": "db1",
+                            "user": "u1",
+                            "password": "p1",
+                        },
+                    )
+                    self.assertEqual(r1.status_code, 200)
+
+                    # 2. Register again with same ID and updated name
+                    r2 = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "id": "my_custom_id",
+                            "name": "Updated Name",
+                            "host": "h2",
+                            "dbname": "db2",
+                            "user": "u2",
+                            "password": "p2",
+                        },
+                    )
+                    self.assertEqual(r2.status_code, 200)
+
+                    saved = json.loads(temp_file.read_text(encoding="utf-8"))
+                    self.assertEqual(len(saved), 1)
+                    self.assertEqual(saved[0]["name"], "Updated Name")
+                    self.assertEqual(saved[0]["host"], "h2")
+
+    def test_datasources_corrupted_json_file_graceful_fallback(self) -> None:
+        """Issue #37: Corrupted datasources.json gracefully falls back to default raw dataset."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+            temp_file.write_text("{invalid_json_corrupted", encoding="utf-8")
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                response = self.client.get("/api/datasources")
+                self.assertEqual(response.status_code, 200)
+                items = response.json()
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["id"], "raw")
+
+    @patch.object(agent, "describe_data")
+    def test_chat_recognizes_registered_external_datasource_id(
+        self, mock_describe: MagicMock
+    ) -> None:
+        """Issue #37 & #40: Registered datasource ID in datasources.json is accepted by /api/chat."""
+        mock_describe.return_value = {
+            "answer": "Описание внешнего источника.",
+            "table": None,
+            "chart": None,
+            "sql": None,
+            "clarification": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+            temp_file.write_text(
+                json.dumps([{"id": "ext_dwh", "name": "Enterprise DWH", "tables": []}]),
+                encoding="utf-8",
+            )
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                response = self.client.post(
+                    "/api/chat",
+                    json={
+                        "session_id": "test-registered-ext-ds",
+                        "message": "Опиши таблицы",
+                        "datasource_id": "ext_dwh",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertNotIn("не найден в каталоге данных", data["answer"])
+
+    def test_datasource_test_missing_required_dbname_rejected(self) -> None:
+        """Issue #37: Request missing dbname and database alias is rejected with HTTP 422."""
+        response = self.client.post(
+            "/api/datasources/test",
+            json={"host": "localhost", "user": "bi_reader"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_datasource_test_missing_required_user_rejected(self) -> None:
+        """Issue #37: Request missing user and username alias is rejected with HTTP 422."""
+        response = self.client.post(
+            "/api/datasources/test",
+            json={"host": "localhost", "dbname": "test_db"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_datasource_test_whitespace_host_rejected(self) -> None:
+        """Issue #37: Whitespace-only host is stripped and rejected with HTTP 422."""
+        response = self.client.post(
+            "/api/datasources/test",
+            json={"host": "   ", "dbname": "test_db", "user": "bi_reader"},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    @patch("psycopg.connect")
+    def test_datasource_test_case_insensitive_schema_and_views(self, mock_connect: MagicMock) -> None:
+        """Issue #37: Table discovery uses lower(table_schema) and includes VIEWs."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = [("mv_daily_sales",), ("raw_orders",)]
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_connect.return_value.__enter__.return_value = mock_conn
+
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "localhost",
+                "dbname": "analytics",
+                "user": "bi_reader",
+                "schema_name": "RAW",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["tables_count"], 2)
+        self.assertIn("mv_daily_sales", data["tables"])
+
+        # Check executed query uses lower(table_schema) and table_type IN ('BASE TABLE', 'VIEW')
+        cur_exec_args = mock_cursor.execute.call_args[0]
+        sql_query = cur_exec_args[0]
+        self.assertIn("lower(table_schema)", sql_query)
+        self.assertIn("'VIEW'", sql_query)
+
+    def test_datasource_create_cyrillic_slug_transliteration(self) -> None:
+        """Issue #37: Russian datasource name transliterates to clean ASCII ID without collision."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(True, 12.0, ["tbl1"], "OK"),
+                ):
+                    response = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "name": "Внешняя аналитическая БД",
+                            "host": "postgres.internal",
+                            "dbname": "analytics_db",
+                            "user": "bi_reader",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    data = response.json()
+                    self.assertEqual(data["id"], "vneshnyaya_analiticheskaya_bd")
+
+    def test_datasource_create_duplicate_slug_increments_suffix(self) -> None:
+        """Issue #37: Consecutive registrations with identical name receive distinct unique IDs."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(True, 12.0, ["tbl1"], "OK"),
+                ):
+                    r1 = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "name": "Внешняя БД",
+                            "host": "h1",
+                            "dbname": "db1",
+                            "user": "u1",
+                        },
+                    )
+                    self.assertEqual(r1.status_code, 200)
+                    self.assertEqual(r1.json()["id"], "vneshnyaya_bd")
+
+                    r2 = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "name": "Внешняя БД",
+                            "host": "h2",
+                            "dbname": "db2",
+                            "user": "u2",
+                        },
+                    )
+                    self.assertEqual(r2.status_code, 200)
+                    self.assertEqual(r2.json()["id"], "vneshnyaya_bd_2")
+
+    def test_datasource_create_rejects_reserved_raw_id(self) -> None:
+        """Issue #37: Attempting to register datasource with reserved id='raw' is rejected with HTTP 400."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                with patch.object(
+                    datasources,
+                    "test_postgres_connection",
+                    return_value=(True, 5.0, [], "OK"),
+                ):
+                    response = self.client.post(
+                        "/api/datasources",
+                        json={
+                            "id": "raw",
+                            "name": "Illegal Raw Override",
+                            "host": "h",
+                            "dbname": "db",
+                            "user": "u",
+                        },
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("зарезервирован", response.json()["detail"])
+
+    def test_datasource_response_enforces_password_masking_against_leak(self) -> None:
+        """Issue #37: DataSourceResponse always masks password even if caller injects plain secret."""
+        from backend.app.api.schemas import DataSourceResponse
+
+        ds = DataSourceResponse(
+            id="ds_sec",
+            name="Secure DS",
+            host="localhost",
+            dbname="db",
+            user="u",
+            password="leaked_plaintext_super_secret",
+        )
+        self.assertEqual(ds.password, "******")
+        self.assertNotIn("leaked_plaintext_super_secret", ds.model_dump_json())
+
+    @patch.object(agent, "describe_data")
+    def test_chat_external_datasource_valid_scoped_table(
+        self, mock_describe: MagicMock
+    ) -> None:
+        """Issue #37 & #40: Valid table scoped to external datasource is accepted by /api/chat."""
+        mock_describe.return_value = {
+            "answer": "Таблица заказов внешнего источника.",
+            "table": {"columns": ["Таблица"], "rows": [["orders"]]},
+            "chart": None,
+            "sql": None,
+            "clarification": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+            temp_file.write_text(
+                json.dumps([{"id": "ext_dwh", "name": "Enterprise DWH", "tables": ["orders", "users"]}]),
+                encoding="utf-8",
+            )
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                response = self.client.post(
+                    "/api/chat",
+                    json={
+                        "session_id": "test-ext-table-scoped",
+                        "message": "Что в данных?",
+                        "datasource_id": "ext_dwh",
+                        "table_name": "orders",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertNotIn("не принадлежит источнику", data["answer"])
+                mock_describe.assert_called_once()
+                passed_cat = mock_describe.call_args[0][0]
+                self.assertEqual(len(passed_cat["tables"]), 1)
+                self.assertEqual(passed_cat["tables"][0]["name"], "orders")
+
+    def test_chat_external_datasource_foreign_table_rejected(self) -> None:
+        """Issue #37 & #40: Invalid table for external datasource is rejected with clear available tables list."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+            temp_file.write_text(
+                json.dumps([{"id": "ext_dwh", "name": "Enterprise DWH", "tables": ["orders", "users"]}]),
+                encoding="utf-8",
+            )
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                response = self.client.post(
+                    "/api/chat",
+                    json={
+                        "session_id": "test-ext-foreign-table",
+                        "message": "Какая выручка?",
+                        "datasource_id": "ext_dwh",
+                        "table_name": "data_01_Продажи",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertIn("не принадлежит источнику данных «Enterprise DWH»", data["answer"])
+                self.assertIn("«orders»", data["answer"])
+                self.assertIn("«users»", data["answer"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
