@@ -414,6 +414,233 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("Ошибка при ответе на вопрос", response.json()["detail"])
 
+    def test_chat_request_schema_supports_optional_scoping(self) -> None:
+        """Issue #40 / BI-12: ChatRequest schema supports optional datasource_id and table_name."""
+        try:
+            from backend.app.api.schemas import ChatRequest
+        except ImportError:
+            from app.api.schemas import ChatRequest
+
+        req = ChatRequest(
+            session_id="sess-1",
+            message="Какая выручка?",
+            datasource_id="raw",
+            table_name="data_01_Продажи",
+        )
+        self.assertEqual(req.datasource_id, "raw")
+        self.assertEqual(req.table_name, "data_01_Продажи")
+
+        # Backward compatibility: omitted fields default to None
+        req_default = ChatRequest(session_id="sess-2", message="Что в данных?")
+        self.assertIsNone(req_default.datasource_id)
+        self.assertIsNone(req_default.table_name)
+
+    @patch.object(agent, "process_chat_message")
+    def test_chat_passes_scoping_parameters_to_agent(self, mock_proc: MagicMock) -> None:
+        """Issue #40 / BI-12: chat endpoint passes datasource_id and table_name to agent."""
+        mock_proc.return_value = {
+            "answer": "Результат",
+            "chart": None,
+            "table": None,
+            "sql": None,
+            "clarification": None,
+        }
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-scope-pass",
+                "message": "Какая выручка?",
+                "datasource_id": "raw",
+                "table_name": "data_01_Продажи",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_proc.assert_called_once_with(
+            "Какая выручка?",
+            session_id="test-scope-pass",
+            datasource_id="raw",
+            table_name="data_01_Продажи",
+        )
+
+    @patch.object(agent, "get_reader_connection", return_value=MagicMock())
+    @patch.object(agent, "answer_question")
+    def test_chat_with_active_table_name_restricts_catalog_for_sql(
+        self, mock_answer: MagicMock, mock_conn: MagicMock
+    ) -> None:
+        """Issue #40 / BI-12: ChatRequest with active table_name restricts catalog and guides SQL generation."""
+        mock_answer.return_value = {
+            "answer": "Выручка составила 1 000 000 руб.",
+            "chart": None,
+            "table": {"columns": ["Выручка"], "rows": [["1 000 000"]]},
+            "sql": "SELECT SUM(price) FROM t",
+            "clarification": None,
+        }
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-table-scoped-sql",
+                "message": "Какая общая выручка?",
+                "table_name": "data_01_Продажи",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_answer.assert_called_once()
+        args, kwargs = mock_answer.call_args
+        call_catalog = args[1] if len(args) > 1 else kwargs.get("catalog")
+        self.assertIsNotNone(call_catalog)
+        self.assertEqual(len(call_catalog["tables"]), 1)
+        self.assertEqual(call_catalog["tables"][0]["name"], "data_01_Продажи")
+        self.assertEqual(kwargs.get("table_name"), "data_01_Продажи")
+
+    @patch.object(agent, "describe_data")
+    def test_chat_describe_intent_with_active_table_returns_single_table_overview(
+        self, mock_describe: MagicMock
+    ) -> None:
+        """Issue #40 / BI-12: Describe intent with active table returns single-table overview."""
+        mock_describe.return_value = {
+            "answer": "Таблица «Продажи» хранит данные о продажах.",
+            "table": {
+                "columns": ["Таблица", "Строк", "Колонок", "Числовых", "С датами"],
+                "rows": [["Продажи", "500 000", "7", "1", "1"]],
+            },
+            "chart": None,
+            "sql": None,
+            "clarification": None,
+        }
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-describe-single-table",
+                "message": "Что в данных?",
+                "table_name": "data_01_Продажи",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("«Продажи»", data["answer"])
+        self.assertIsNotNone(data["table"])
+        self.assertEqual(len(data["table"]["rows"]), 1)
+        self.assertEqual(data["table"]["rows"][0][0], "Продажи")
+
+        mock_describe.assert_called_once()
+        passed_cat = mock_describe.call_args[0][0]
+        self.assertEqual(len(passed_cat["tables"]), 1)
+        self.assertEqual(passed_cat["tables"][0]["name"], "data_01_Продажи")
+        self.assertEqual(mock_describe.call_args[1].get("table_name"), "data_01_Продажи")
+
+    @patch.object(agent, "describe_data")
+    def test_chat_natural_describe_phrasing_with_active_table(
+        self, mock_describe: MagicMock
+    ) -> None:
+        """Issue #40: Natural phrasing 'Опиши эту таблицу' triggers describe_data."""
+        mock_describe.return_value = {
+            "answer": "Таблица о продажах.",
+            "table": {"columns": ["Таблица", "Строк"], "rows": [["Продажи", "500 000"]]},
+            "chart": None,
+            "sql": None,
+            "clarification": None,
+        }
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-natural-describe",
+                "message": "Опиши эту таблицу",
+                "table_name": "data_01_Продажи",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_describe.assert_called_once()
+
+    def test_chat_invalid_table_name_returns_graceful_notification(self) -> None:
+        """Issue #40 / BI-12: Invalid table name returns structured graceful notification."""
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-invalid-table",
+                "message": "Какая выручка?",
+                "table_name": "несуществующая_таблица_xyz",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsNone(data["sql"])
+        self.assertIsNone(data["table"])
+        self.assertIsNone(data["chart"])
+        self.assertIn("не найдена в каталоге данных", data["answer"])
+        self.assertIn("«Продажи»", data["answer"])
+
+    def test_chat_invalid_datasource_id_returns_graceful_notification(self) -> None:
+        """Issue #40 / BI-12: Invalid datasource_id returns structured graceful notification."""
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-invalid-ds",
+                "message": "Какая выручка?",
+                "datasource_id": "unknown_datasource_xyz",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsNone(data["sql"])
+        self.assertIn("не найден в каталоге данных", data["answer"])
+        self.assertIn("«Продажи»", data["answer"])
+
+    def test_chat_conflicting_datasource_and_table_returns_notification(self) -> None:
+        """Issue #40: Conflicting datasource_id and table_name returns graceful explanation."""
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-conflict-ds-table",
+                "message": "Какая выручка?",
+                "datasource_id": "data_02_Техническая_поддержка",
+                "table_name": "data_01_Продажи",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIsNone(data["sql"])
+        self.assertIn("не принадлежит источнику данных", data["answer"])
+
+    def test_chat_common_prefix_data_does_not_falsely_match(self) -> None:
+        """Issue #40: table_name='data' must not falsely match data_01_Продажи."""
+        response = self.client.post(
+            "/api/chat",
+            json={
+                "session_id": "test-prefix-data",
+                "message": "Какая выручка?",
+                "table_name": "data",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("не найдена в каталоге данных", data["answer"])
+
+    @patch.object(agent, "describe_data")
+    def test_chat_backward_compatibility_when_scope_omitted(
+        self, mock_describe: MagicMock
+    ) -> None:
+        """Issue #40 / BI-12: Full backward compatibility when datasource_id and table_name are omitted."""
+        mock_describe.return_value = {
+            "answer": "Обзор всей базы данных.",
+            "table": {
+                "columns": ["Таблица", "Строк"],
+                "rows": [["Продажи", "500 000"], ["Доставка", "100 000"]],
+            },
+            "chart": None,
+            "sql": None,
+            "clarification": None,
+        }
+        response = self.client.post(
+            "/api/chat",
+            json={"session_id": "test-no-scope", "message": "Опиши таблицы"},
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_describe.assert_called_once()
+        passed_cat = mock_describe.call_args[0][0]
+        # Full catalog has 9 tables
+        self.assertEqual(len(passed_cat["tables"]), 9)
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,6 +61,8 @@ class ChatRequest(BaseModel):
 
     session_id: str = Field(min_length=1)
     message: str = Field(min_length=1, max_length=4000)
+    datasource_id: str | None = None
+    table_name: str | None = None
 
 
 class ChatResponse(BaseModel):

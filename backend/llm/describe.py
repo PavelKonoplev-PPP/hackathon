@@ -20,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-from .catalog_summary import (display_table_name, overview_table, quality_section,
+from .catalog_summary import (display_table_name, match_table_name, overview_table, quality_section,
                               relationships_section, summarize_catalog, table_block)
 
 RULES = """Правила:
@@ -52,6 +52,23 @@ OVERVIEW_PROMPT = f"""Ты — аналитик данных. Тебе дали 
 {RULES}"""
 
 
+SINGLE_TABLE_OVERVIEW_PROMPT = f"""Ты — аналитик данных. Тебе дано описание таблицы «{{name}}».
+Напиши ответ строго в таком формате:
+
+Общая картина: <2–3 предложения: о чём эта таблица, какие бизнес-процессы она отражает>
+
+Что можно спросить:
+1. <вопрос>
+2. <вопрос>
+3. <вопрос>
+4. <вопрос>
+5. <вопрос>
+
+Вопросы должны быть конкретными, строго к таблице «{{name}}», и отвечать на них можно по
+показателям и разрезам из её описания (например: «Какой канал продаж приносит больше всего выручки?»).
+{RULES}"""
+
+
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
 
@@ -78,12 +95,32 @@ def describe_table(client, table: dict) -> str:
 
 
 def describe_data(catalog: dict, relationships: dict | None = None,
-                  client=None, progress=None) -> dict:
+                  client=None, progress=None, table_name: str | None = None) -> dict:
     """Возвращает ответ в формате docs/api-contract.md: answer + table."""
     if client is None:
         from .client import LLMClient
         client = LLMClient()
     tables = catalog.get("tables") or []
+
+    if table_name:
+        t_clean = table_name.strip()
+        matched = []
+        for t in tables:
+            if match_table_name(t, t_clean):
+                matched.append(t)
+                break
+        if not matched:
+            available = [display_table_name(t.get("name", "")) for t in tables]
+            available_str = ", ".join(f"«{n}»" for n in available if n)
+            return {
+                "answer": f"Таблица «{table_name}» не найдена в каталоге данных. Доступные таблицы: {available_str}.",
+                "table": None,
+                "chart": None,
+                "sql": None,
+                "clarification": None,
+            }
+        tables = matched
+        catalog = {**catalog, "tables": tables}
 
     parts = []
     for i, table in enumerate(tables, 1):
@@ -95,9 +132,18 @@ def describe_data(catalog: dict, relationships: dict | None = None,
     short = "\n".join(f"- «{name}»: {text}" for name, text in parts)
     if progress:
         progress("Общая картина и примеры вопросов")
+
+    if len(tables) == 1:
+        tbl_name = display_table_name(tables[0]["name"])
+        sys_prompt = SINGLE_TABLE_OVERVIEW_PROMPT.format(name=tbl_name)
+        user_msg = f"Таблица «{tbl_name}»:\n\n{short}"
+    else:
+        sys_prompt = OVERVIEW_PROMPT
+        user_msg = f"Таблиц: {len(tables)}.\n\n{short}"
+
     overview = client.chat([
-        {"role": "system", "content": OVERVIEW_PROMPT},
-        {"role": "user", "content": f"Таблиц: {len(tables)}.\n\n{short}"},
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": user_msg},
     ], max_tokens=700).strip()
 
     links = relationships_section(relationships) if relationships else ""
