@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendMessage } from './api.js'
 import { detectViewRequest, viewPhrase } from './chartViews.js'
+import { createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
+import { dashboardHref } from './router.js'
 
 const KEY = 'bi-chat-conversations-v1'
 const TITLE_MAX = 40
@@ -37,8 +39,10 @@ function load() {
 }
 
 // Диалоги хранятся только в браузере (localStorage). Бэкенд помнит контекст по sessionId.
-export function useConversations() {
+export function useConversations({ onDashboardCreated } = {}) {
   const [state, setState] = useState(load)
+  const onCreatedRef = useRef(onDashboardCreated)
+  onCreatedRef.current = onDashboardCreated
   const [loadingIds, setLoadingIds] = useState([])
   const stateRef = useRef(state)
   const loadingRef = useRef(new Set())
@@ -68,6 +72,17 @@ export function useConversations() {
       ...c,
       messages: c.messages.map((m) => (m.id === msgId ? { ...m, view } : m)),
     }))
+
+  const rename = (id, title) => update(id, (c) => ({ ...c, title }))
+
+  // Дашборд из всех графиков и таблиц диалога (сценарий 5).
+  async function buildDashboard(id) {
+    const conv = stateRef.current.conversations.find((c) => c.id === id)
+    if (!conv || resultsFromMessages(conv.messages).length === 0) return null
+    const d = await createDashboardFromMessages(`Дашборд: ${conv.title}`, conv.messages)
+    onCreatedRef.current?.()
+    return d
+  }
 
   const select = (id) => setState((s) => ({ ...s, activeId: id }))
 
@@ -102,6 +117,39 @@ export function useConversations() {
         view: wantedView,
       }
       update(id, (c) => ({ ...c, messages: [...c.messages, userMsg, botMsg], updatedAt: Date.now() }))
+      return
+    }
+
+    // «Собери дашборд»: агент дашборды не строит, собираем из результатов диалога на фронтенде.
+    if (detectDashboardRequest(message)) {
+      update(id, (c) => ({
+        ...c,
+        title: c.messages.length === 0 ? makeTitle(message) : c.title,
+        messages: [...c.messages, userMsg],
+        updatedAt: Date.now(),
+      }))
+      let reply
+      if (resultsFromMessages(conv.messages).length === 0) {
+        reply = {
+          id: uuid(),
+          role: 'assistant',
+          text: 'Дашборд собирается из графиков и таблиц этого диалога, а их пока нет. Задайте сначала несколько вопросов к данным.',
+          clarification: { question: 'Например:', options: ['Продажи по каналам', 'Динамика продаж по месяцам', 'Опиши данные'] },
+        }
+      } else {
+        try {
+          const d = await buildDashboard(id)
+          reply = {
+            id: uuid(),
+            role: 'assistant',
+            text: `Собрал дашборд «${d.title}». Виджетов: ${d.widgets.length}. Его можно открыть повторно в разделе «Дашборды».`,
+            link: { href: dashboardHref(d.id), label: 'Открыть дашборд' },
+          }
+        } catch (e) {
+          reply = { id: uuid(), role: 'assistant', error: true, text: `Не удалось собрать дашборд: ${e.message}` }
+        }
+      }
+      update(id, (c) => ({ ...c, messages: [...c.messages, reply], updatedAt: Date.now() }))
       return
     }
 
@@ -149,5 +197,7 @@ export function useConversations() {
     remove,
     send,
     setView,
+    rename,
+    buildDashboard,
   }
 }
