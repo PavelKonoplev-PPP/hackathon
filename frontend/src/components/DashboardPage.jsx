@@ -165,6 +165,7 @@ export default function DashboardPage({ id }) {
               widget={w}
               shown={shown[i]}
               filtered={Boolean(activePeriod) && isPeriodAware(w)}
+              unfiltered={Boolean(activePeriod) && !isPeriodAware(w) && Boolean(w.chart || w.table)}
               gridRef={gridRef}
               dragging={dragId === w.id}
               dropTarget={overId === w.id && dragId !== w.id}

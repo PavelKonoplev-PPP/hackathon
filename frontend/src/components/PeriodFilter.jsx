@@ -17,6 +17,7 @@ export default function PeriodFilter({ bounds, period, onChange }) {
       <button className="mini" onClick={() => onChange(null)} disabled={!from && !to}>
         Весь период
       </button>
+      <span className="period-hint">Сужает графики и таблицы по датам; итоги и KPI остаются за весь период.</span>
     </div>
   )
 }
