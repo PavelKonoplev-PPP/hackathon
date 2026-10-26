@@ -1,4 +1,8 @@
-from fastapi import APIRouter, HTTPException
+import logging
+import tempfile
+from pathlib import Path
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from .schemas import (
     AskRequest,
@@ -6,6 +10,12 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     ColumnSchema,
+    CsvPreviewResponse,
+    CsvUploadResponse,
+    DashboardCreateRequest,
+    DashboardDetail,
+    DashboardSummary,
+    DashboardUpdateRequest,
     DataSourceCreateRequest,
     DataSourceResponse,
     DataSourceTestRequest,
@@ -13,15 +23,37 @@ from .schemas import (
     HealthResponse,
     RelationshipSchema,
     SchemaResponse,
-    DashboardCreateRequest,
-    DashboardDetail,
-    DashboardSummary,
-    DashboardUpdateRequest,
     TableSchema,
 )
-from ..db.session import check_db
+from ..db.session import check_db, get_reader_connection, get_writer_connection
 from ..llm.client import LLMError
 from ..services import agent, dashboards, datasources
+
+logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB limit
+
+def _get_csv_modules():
+    try:
+        from db.csv_service import preview_csv, import_uploaded_csv
+        from db.load_csv import table_name_for
+        from db.refresh_catalog import refresh_catalog
+        return preview_csv, import_uploaded_csv, table_name_for, refresh_catalog
+    except (ImportError, AttributeError):
+        import sys
+        repo_root = Path(__file__).resolve().parents[3]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        import db.csv_service
+        import db.load_csv
+        import db.refresh_catalog
+        return (
+            db.csv_service.preview_csv,
+            db.csv_service.import_uploaded_csv,
+            db.load_csv.table_name_for,
+            db.refresh_catalog.refresh_catalog,
+        )
+
 
 try:
     from backend.llm.catalog_summary import display_table_name, table_row_count
@@ -89,8 +121,86 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
 
 @router.get("/api/schema", response_model=SchemaResponse)
 @router.get("/schema", response_model=SchemaResponse)
-def get_schema() -> SchemaResponse:
+def get_schema(datasource_id: str | None = None) -> SchemaResponse:
     """Return catalog schema including tables, columns, row counts, warnings, and relationships."""
+    # 1. External datasource schema handling
+    if datasource_id and datasource_id.strip().lower() != "raw":
+        ds_clean = datasource_id.strip()
+        ext_cat = None
+        try:
+            try:
+                from db.external_catalog import read_external_catalog
+                ext_cat = read_external_catalog(Path("data"), ds_clean)
+            except ImportError:
+                from ...db.external_catalog import read_external_catalog  # type: ignore
+                ext_cat = read_external_catalog(Path("data"), ds_clean)
+        except Exception:
+            ext_cat = None
+
+        if not ext_cat:
+            stored_ds = datasources.get_all_datasources()
+            matched_ds = next((ds for ds in stored_ds if ds.id.lower() == ds_clean.lower()), None)
+            if not matched_ds:
+                raise HTTPException(status_code=404, detail=f"Источник данных «{datasource_id}» не найден.")
+
+            ext_tables_out = [
+                TableSchema(
+                    name=t,
+                    display_name=display_table_name(t),
+                    row_count=None,
+                    columns=[],
+                    warnings=[],
+                )
+                for t in matched_ds.tables
+            ]
+            return SchemaResponse(
+                schema_name=matched_ds.schema_name or matched_ds.dbname,
+                sources=[matched_ds.id] + matched_ds.tables,
+                tables=ext_tables_out,
+                relationships=[],
+                warnings=["Внешний источник PostgreSQL (список таблиц получен)"],
+            )
+
+        schema_name = ext_cat.get("schema") or ds_clean
+        top_warnings = ["Внешний каталог PostgreSQL (режим read-only)"]
+        tables_out = []
+        for t in ext_cat.get("tables", []):
+            if not isinstance(t, dict):
+                continue
+            t_name = t.get("name") or ""
+            cols_out = []
+            for c in t.get("columns", []):
+                if not isinstance(c, dict):
+                    continue
+                cols_out.append(
+                    ColumnSchema(
+                        name=c.get("name") or "",
+                        type=c.get("inferred_type") or c.get("postgres_type") or "text",
+                        postgres_type=c.get("postgres_type"),
+                        inferred_type=c.get("inferred_type"),
+                        nullable=bool(c.get("nullable", True)),
+                        warning=c.get("warning"),
+                    )
+                )
+            tables_out.append(
+                TableSchema(
+                    name=t_name,
+                    display_name=display_table_name(t_name),
+                    row_count=table_row_count(t),
+                    columns=cols_out,
+                    warnings=t.get("warnings", []),
+                )
+            )
+        sources = [schema_name] + [t.name for t in tables_out if t.name]
+        return SchemaResponse(
+            schema_name=schema_name,
+            sources=sources,
+            tables=tables_out,
+            relationships=[],
+            warnings=top_warnings,
+        )
+
+    # 2. Local raw schema handling
     catalog, relationships = agent.load_catalogs()
     if not catalog or not isinstance(catalog, dict):
         return SchemaResponse(
@@ -233,6 +343,160 @@ def get_schema() -> SchemaResponse:
         relationships=rels_out,
         warnings=top_warnings,
     )
+
+
+# CSV Upload & Preview endpoints (FastAPI integration with db.csv_service & db.refresh_catalog)
+@router.post("/api/csv/preview", response_model=CsvPreviewResponse)
+@router.post("/csv/preview", response_model=CsvPreviewResponse)
+async def preview_csv_endpoint(
+    file: UploadFile = File(...),
+    delimiter: str | None = Form(None),
+    encoding: str = Form("utf-8-sig"),
+    preview_rows: int = Form(5),
+) -> CsvPreviewResponse:
+    """Sniff CSV format, delimiters and preview top rows safely without full load."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Файл должен иметь расширение .csv")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            size = 0
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Размер файла превышает допустимый лимит (100 МБ).",
+                    )
+                tmp.write(chunk)
+
+        preview_csv, _, _, _ = _get_csv_modules()
+
+        preview = preview_csv(
+            tmp_path,
+            original_filename=file.filename,
+            delimiter=delimiter,
+            encoding=encoding,
+            preview_rows=preview_rows,
+        )
+        return CsvPreviewResponse(
+            filename=preview["filename"],
+            schema_name=preview.get("schema", "raw"),
+            table_name=preview["table_name"],
+            encoding=preview["encoding"],
+            delimiter=preview["delimiter"],
+            original_headers=preview["original_headers"],
+            columns=preview["columns"],
+            rows=preview["rows"],
+            warnings=preview.get("warnings", []),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки CSV: {exc}") from exc
+    finally:
+        if tmp_path and tmp_path.is_file():
+            tmp_path.unlink(missing_ok=True)
+
+
+@router.post("/api/csv/upload", response_model=CsvUploadResponse)
+@router.post("/api/data/upload", response_model=CsvUploadResponse)
+@router.post("/csv/upload", response_model=CsvUploadResponse)
+async def upload_csv_endpoint(
+    file: UploadFile = File(...),
+    delimiter: str | None = Form(None),
+    encoding: str = Form("utf-8-sig"),
+    replace: bool = Form(False),
+) -> CsvUploadResponse:
+    """Stream CSV into PostgreSQL raw schema with overwrite protection and catalog refresh."""
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Файл должен иметь расширение .csv")
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            size = 0
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Размер файла превышает допустимый лимит (100 МБ).",
+                    )
+                tmp.write(chunk)
+
+        _, import_uploaded_csv, table_name_for, refresh_catalog = _get_csv_modules()
+
+        target_table_name = table_name_for(Path(file.filename))
+
+        # Check existing table to prevent accidental overwrite
+        if not replace:
+            try:
+                with get_reader_connection() as r_conn:
+                    with r_conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            SELECT 1 FROM information_schema.tables
+                            WHERE lower(table_schema) = 'raw' AND lower(table_name) = lower(%s);
+                            """,
+                            (target_table_name,),
+                        )
+                        if cur.fetchone() is not None:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=(
+                                    f"Таблица «{target_table_name}» уже существует в схеме raw. "
+                                    "Перезапись запрещена (передайте replace=True для явной перезаписи)."
+                                ),
+                            )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.warning("Table existence check skipped: %s", exc)
+
+        with get_writer_connection() as w_conn:
+            res = import_uploaded_csv(
+                w_conn,
+                tmp_path,
+                original_filename=file.filename,
+                schema="raw",
+                delimiter=delimiter,
+                encoding=encoding,
+                replace=replace,
+            )
+            w_conn.commit()
+            refresh_catalog(w_conn, table=res["table_name"], schema="raw")
+
+        try:
+            from backend.llm.sql_runner import clear_values_cache
+            clear_values_cache()
+        except Exception:
+            pass
+
+        return CsvUploadResponse(
+            status="ok",
+            schema_name=res["schema"],
+            table_name=res["table_name"],
+            row_count=res["row_count"],
+            columns=res["columns"],
+            warnings=res.get("warnings", []),
+            catalog_refreshed=True,
+            message="Таблица успешно импортирована, каталог обновлён.",
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Ошибка импорта CSV: {exc}") from exc
+    finally:
+        if tmp_path and tmp_path.is_file():
+            tmp_path.unlink(missing_ok=True)
 
 
 # DataSource endpoints (Sprint 3 / BI-09 / Issue #37)

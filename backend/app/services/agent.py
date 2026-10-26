@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -7,12 +8,15 @@ from ..config import get_settings
 from ..db.session import get_reader_connection
 from ..llm.client import chat
 
+logger = logging.getLogger(__name__)
+
 SYSTEM_PROMPT = (
     "Ты аналитический ассистент. Отвечай на русском языке кратко и по делу. "
     "Доступа к данным пока нет."
 )
 
 _SESSION_HISTORY: dict[str, list[dict[str, str]]] = {}
+_SESSION_DATASOURCES: dict[str, str] = {}
 
 # Try importing teammate's LLM core modules from PR #21 / #22
 try:
@@ -90,7 +94,6 @@ except ImportError:
                 if q_lower.startswith(code + "_"):
                     return True
             return False
-
 
 
 class AgentServiceError(RuntimeError):
@@ -246,6 +249,39 @@ def filter_catalog_for_scope(
 
     # 3. Handle external datasource scoping
     if matched_ext_ds is not None:
+        # Check if full external catalog file exists on disk
+        ext_cat = None
+        try:
+            try:
+                from db.external_catalog import read_external_catalog
+                ext_cat = read_external_catalog(Path("data"), matched_ext_ds.id)
+            except ImportError:
+                from ...db.external_catalog import read_external_catalog  # type: ignore
+                ext_cat = read_external_catalog(Path("data"), matched_ext_ds.id)
+        except Exception:
+            ext_cat = None
+
+        if ext_cat and isinstance(ext_cat.get("tables"), list):
+            cat_tables = ext_cat["tables"]
+            if table_name:
+                t_clean = table_name.strip()
+                matched_t = next(
+                    (t for t in cat_tables if isinstance(t, dict) and match_table_name(t, t_clean)),
+                    None,
+                )
+                if not matched_t:
+                    ext_tables_str = ", ".join(
+                        f"«{t.get('name')}»" for t in cat_tables if isinstance(t, dict) and t.get("name")
+                    )
+                    return (
+                        None,
+                        None,
+                        f"Таблица «{table_name}» не принадлежит источнику данных «{matched_ext_ds.name}». "
+                        f"Доступные таблицы: {ext_tables_str}.",
+                    )
+                return {**ext_cat, "tables": [matched_t]}, None, None
+            return ext_cat, None, None
+
         ext_tables = matched_ext_ds.tables or []
         ext_tables_str = ", ".join(f"«{t}»" for t in ext_tables) if ext_tables else "нет таблиц"
         if table_name:
@@ -260,12 +296,14 @@ def filter_catalog_for_scope(
                 )
             target_t_dict = {"name": matched_t, "display_name": matched_t, "columns": []}
             ext_cat = {
+                "datasource_id": matched_ext_ds.id,
                 "schema": matched_ext_ds.schema_name or matched_ext_ds.dbname,
                 "tables": [target_t_dict],
             }
             return ext_cat, None, None
         else:
             ext_cat = {
+                "datasource_id": matched_ext_ds.id,
                 "schema": matched_ext_ds.schema_name or matched_ext_ds.dbname,
                 "tables": [{"name": t, "display_name": t, "columns": []} for t in ext_tables],
             }
@@ -284,14 +322,14 @@ def filter_catalog_for_scope(
                 None,
                 None,
                 f"Таблица «{table_name}» не найдена в каталоге данных. "
-                f"Доступные таблицы: {available_str}."
+                f"Доступные таблицы: {available_str}.",
             )
         if matched_by_source and matched_by_source.get("name") != target_table.get("name"):
             return (
                 None,
                 None,
                 f"Таблица «{table_name}» не принадлежит источнику данных «{datasource_id}». "
-                f"Доступные таблицы: {available_str}."
+                f"Доступные таблицы: {available_str}.",
             )
     elif matched_by_source:
         target_table = matched_by_source
@@ -352,6 +390,20 @@ def process_chat_message(
     Uses teammate's describe_data / answer_question when available,
     otherwise falls back to basic chat completion.
     """
+    # 0. Context isolation when switching datasources within the same session
+    if session_id:
+        active_ds = (datasource_id or "raw").strip().lower()
+        last_ds = _SESSION_DATASOURCES.get(session_id)
+        if last_ds is not None and last_ds != active_ds:
+            _SESSION_HISTORY.pop(session_id, None)
+            if HAS_LLM_MODULE:
+                try:
+                    from backend.llm.ask import reset_session
+                    reset_session(session_id)
+                except Exception:
+                    pass
+        _SESSION_DATASOURCES[session_id] = active_ds
+
     # 1. Защита от деструктивных операций (DDL/DML)
     mutation = check_destructive_mutation(message)
     if mutation:
@@ -425,11 +477,33 @@ def process_chat_message(
         # Analytical SQL query
         conn = None
         if runner is None:
-            try:
-                conn = get_reader_connection()
-                runner = PostgresRunner(conn)
-            except Exception as exc:
-                raise AgentServiceError(f"Не удалось подключиться к базе данных под bi_reader: {exc}") from exc
+            ext_ds_id = None
+            if datasource_id and datasource_id.strip().lower() != "raw":
+                from .datasources import get_all_datasources
+
+                for ds in get_all_datasources():
+                    if ds.id != "raw" and ds.id.lower() == datasource_id.strip().lower():
+                        ext_ds_id = ds.id
+                        break
+
+            if ext_ds_id:
+                try:
+                    from .datasources import get_datasource_connection
+
+                    conn, ext_schema, _ = get_datasource_connection(ext_ds_id)
+                    runner = PostgresRunner(conn, schema=ext_schema)
+                except Exception as exc:
+                    raise AgentServiceError(
+                        f"Не удалось подключиться к внешнему источнику данных «{ext_ds_id}»: {exc}"
+                    ) from exc
+            else:
+                try:
+                    conn = get_reader_connection()
+                    runner = PostgresRunner(conn)
+                except Exception as exc:
+                    raise AgentServiceError(
+                        f"Не удалось подключиться к базе данных под bi_reader: {exc}"
+                    ) from exc
 
         try:
             res = answer_question(
@@ -438,6 +512,7 @@ def process_chat_message(
                 runner,
                 session_id=session_id,
                 table_name=table_name,
+                datasource_id=datasource_id,
             )
             return {
                 "answer": res.get("answer", ""),
@@ -473,7 +548,7 @@ def process_chat_message(
                     "clarification": None,
                 }
 
-    ans = answer(message, session_id=session_id)
+    ans = answer(message, session_id=session_id, datasource_id=datasource_id)
     return {
         "answer": ans,
         "chart": None,
@@ -483,7 +558,7 @@ def process_chat_message(
     }
 
 
-def answer(question: str, session_id: str | None = None) -> str:
+def answer(question: str, session_id: str | None = None, datasource_id: str | None = None) -> str:
     """Generate an analytical response for a user question using the LLM."""
     mutation = check_destructive_mutation(question)
     if mutation:
@@ -496,6 +571,11 @@ def answer(question: str, session_id: str | None = None) -> str:
         return ambiguous.to_dict()["answer"]
 
     if session_id:
+        active_ds = (datasource_id or "raw").strip().lower()
+        last_ds = _SESSION_DATASOURCES.get(session_id)
+        if last_ds is not None and last_ds != active_ds:
+            _SESSION_HISTORY.pop(session_id, None)
+        _SESSION_DATASOURCES[session_id] = active_ds
 
         history = _SESSION_HISTORY.setdefault(
             session_id, [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -516,6 +596,7 @@ def answer(question: str, session_id: str | None = None) -> str:
 def clear_session(session_id: str) -> None:
     """Clear memory for a given session."""
     _SESSION_HISTORY.pop(session_id, None)
+    _SESSION_DATASOURCES.pop(session_id, None)
     if HAS_LLM_MODULE:
         try:
             from backend.llm.ask import reset_session

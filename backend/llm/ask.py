@@ -569,7 +569,8 @@ def _refuse(text: str, suggestions: list[str] | None = None) -> dict:
 def answer_question(question: str, catalog: dict, runner, client=None,
                     progress=None, trace: dict | None = None,
                     session_id: str | None = None,
-                    table_name: str | None = None) -> dict:
+                    table_name: str | None = None,
+                    datasource_id: str | None = None) -> dict:
     """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification.
 
     runner — объект с методами run(table, sql) и category_values(table),
@@ -586,6 +587,15 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         from .client import LLMClient
         client = LLMClient()
     state = _session(session_id)
+    if session_id:
+        active_ds = str(datasource_id or catalog.get("datasource_id") or catalog.get("schema") or "raw").lower()
+        last_ds = state.get("datasource_id")
+        if last_ds is not None and last_ds != active_ds:
+            state.pop("last", None)
+            state.pop("pending", None)
+            state.pop("previous", None)
+            state.pop("history", None)
+        state["datasource_id"] = active_ds
     tables = catalog.get("tables") or []
 
     if table_name:

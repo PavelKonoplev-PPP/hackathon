@@ -828,7 +828,10 @@ class ApiTests(unittest.TestCase):
                     self.assertEqual(len(saved_data), 1)
                     self.assertEqual(saved_data[0]["id"], created["id"])
                     self.assertEqual(saved_data[0]["name"], "Новый Маркетинговый Источник")
-                    self.assertEqual(saved_data[0]["password"], "secret_vault_token_456")
+                    # Verify password is encrypted on disk and decryptable in memory
+                    self.assertNotEqual(saved_data[0]["password"], "secret_vault_token_456")
+                    self.assertTrue(str(saved_data[0]["password"]).startswith("gAAAAA"))
+                    self.assertEqual(datasources.decrypt_secret(saved_data[0]["password"]), "secret_vault_token_456")
 
                     # Verify GET /api/datasources returns both raw and the new source
                     get_resp = self.client.get("/api/datasources")
@@ -1315,6 +1318,141 @@ class ApiTests(unittest.TestCase):
 
                 self.assertNotEqual(id1, id2)
                 self.assertTrue(id2.endswith("_2"))
+
+
+    def test_ssrf_forbidden_metadata_host_blocked(self) -> None:
+        """Security: Connection probes to cloud metadata IP are blocked by SSRF safeguard."""
+        response = self.client.post(
+            "/api/datasources/test",
+            json={
+                "host": "169.254.169.254",
+                "dbname": "db",
+                "user": "usr",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertFalse(data["success"])
+        self.assertIn("SSRF", data["message"])
+
+    def test_csv_preview_endpoint_success(self) -> None:
+        """FastAPI endpoint /api/csv/preview sniffs and previews CSV safely."""
+        csv_content = "\ufeffКод;Город;Сумма\n001;Москва;100,50\n002;СПб;250,00\n".encode("utf-8")
+        response = self.client.post(
+            "/api/csv/preview",
+            files={"file": ("orders.csv", csv_content, "text/csv")},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["filename"], "orders.csv")
+        self.assertEqual(data["table_name"], "data_orders")
+        self.assertEqual(data["delimiter"], ";")
+        self.assertEqual(data["columns"], ["Код", "Город", "Сумма"])
+        self.assertEqual(len(data["rows"]), 2)
+        self.assertEqual(data["rows"][0][0], "001")
+
+    def test_csv_preview_endpoint_rejects_non_csv(self) -> None:
+        """FastAPI endpoint /api/csv/preview rejects non-CSV uploads."""
+        response = self.client.post(
+            "/api/csv/preview",
+            files={"file": ("document.pdf", b"%PDF-1.5", "application/pdf")},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(".csv", response.json()["detail"])
+
+    def test_csv_upload_conflict_on_existing_table_without_replace(self) -> None:
+        """FastAPI endpoint /api/csv/upload rejects accidental overwrite with 409 Conflict."""
+        csv_content = b"a;b\n1;2\n"
+        with patch.object(routes, "get_reader_connection") as mock_r_conn:
+            mock_cur = MagicMock()
+            mock_cur.fetchone.return_value = (1,)
+            mock_conn = MagicMock()
+            mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+            mock_r_conn.return_value.__enter__.return_value = mock_conn
+
+            response = self.client.post(
+                "/api/csv/upload",
+                files={"file": ("existing_table.csv", csv_content, "text/csv")},
+                data={"replace": "false"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("уже существует", response.json()["detail"])
+
+    def test_csv_upload_success_with_replace_calls_refresh_catalog(self) -> None:
+        """FastAPI endpoint /api/csv/upload imports table, calls refresh_catalog, and returns 200."""
+        csv_content = b"col1;col2\nval1;val2\n"
+        with patch.object(routes, "get_reader_connection") as mock_r_conn:
+            mock_cur = MagicMock()
+            mock_cur.fetchone.return_value = None
+            mock_conn = MagicMock()
+            mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+            mock_r_conn.return_value.__enter__.return_value = mock_conn
+
+            with patch("db.csv_service.import_uploaded_csv") as mock_import, \
+                 patch("db.refresh_catalog.refresh_catalog") as mock_refresh, \
+                 patch.object(routes, "get_writer_connection") as mock_w_conn:
+                mock_import.return_value = {
+                    "schema": "raw",
+                    "table_name": "data_new_orders",
+                    "row_count": 1,
+                    "columns": ["col1", "col2"],
+                    "warnings": [],
+                }
+                mock_w = MagicMock()
+                mock_w_conn.return_value.__enter__.return_value = mock_w
+
+                response = self.client.post(
+                    "/api/csv/upload",
+                    files={"file": ("new_orders.csv", csv_content, "text/csv")},
+                    data={"replace": "true"},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(data["table_name"], "data_new_orders")
+                self.assertTrue(data["catalog_refreshed"])
+                mock_import.assert_called_once()
+                mock_refresh.assert_called_once()
+
+    def test_schema_endpoint_supports_external_datasource_id(self) -> None:
+        """Issue #37 & #40: GET /api/schema with datasource_id returns external datasource catalog."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+            from backend.app.services import datasources
+            temp_file.write_text(
+                json.dumps([{"id": "ext_erp", "name": "External ERP", "tables": ["erp_orders", "erp_items"]}]),
+                encoding="utf-8",
+            )
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file):
+                response = self.client.get("/api/schema?datasource_id=ext_erp")
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(len(data["tables"]), 2)
+                table_names = [t["name"] for t in data["tables"]]
+                self.assertIn("erp_orders", table_names)
+                self.assertIn("erp_items", table_names)
+
+    def test_chat_context_isolation_across_datasources(self) -> None:
+        """LLM Context Isolation: Switching datasource_id clears dialogue history and state."""
+        sess_id = "test-iso-sess"
+        with patch.object(agent, "answer_question") as mock_ans:
+            mock_ans.return_value = {"answer": "Ответ по raw", "chart": None, "table": None, "sql": None, "clarification": None}
+            self.client.post("/api/chat", json={"session_id": sess_id, "message": "Сколько продаж?", "datasource_id": "raw"})
+            self.assertEqual(agent._SESSION_DATASOURCES.get(sess_id), "raw")
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                temp_file = Path(tmp_dir) / "datasources.json"
+                from backend.app.services import datasources
+                temp_file.write_text(
+                    json.dumps([{"id": "ext_erp", "name": "External ERP", "tables": ["erp_orders"]}]),
+                    encoding="utf-8",
+                )
+                with patch.object(datasources, "get_datasources_path", return_value=temp_file), \
+                     patch.object(datasources, "get_datasource_connection") as mock_ds_conn:
+                    mock_conn = MagicMock()
+                    mock_ds_conn.return_value = (mock_conn, "public", {})
+                    self.client.post("/api/chat", json={"session_id": sess_id, "message": "Сколько заказов?", "datasource_id": "ext_erp"})
+                    self.assertEqual(agent._SESSION_DATASOURCES.get(sess_id), "ext_erp")
 
 
 if __name__ == "__main__":

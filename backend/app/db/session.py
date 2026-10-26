@@ -39,6 +39,19 @@ def get_reader_connection() -> psycopg.Connection:
     )
 
 
+def get_writer_connection() -> psycopg.Connection:
+    """Create a new psycopg connection with write privileges under postgres_user (e.g. for CSV import)."""
+    settings = get_settings()
+    return psycopg.connect(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        dbname=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+        connect_timeout=10,
+    )
+
+
 def check_db() -> bool:
     """Check connectivity to PostgreSQL database by executing a probe query."""
     try:
