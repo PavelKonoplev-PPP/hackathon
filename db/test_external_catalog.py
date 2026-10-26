@@ -23,6 +23,8 @@ class ExternalCatalogTests(unittest.TestCase):
             raw = p / "schema-catalog.json"
             raw.write_text('{"local":true}')
             conn = Mock()
+            conn.transaction.return_value.__enter__ = Mock()
+            conn.transaction.return_value.__exit__ = Mock(return_value=False)
             profile = {"schema": "public", "tables": [{"name": "orders", "columns": []}]}
             audit = {"summary": {"failed_columns": 0}}
             result_catalog = {"schema": "public", "tables": [{"name": "orders"}],
@@ -43,6 +45,8 @@ class ExternalCatalogTests(unittest.TestCase):
     def test_error_does_not_publish_a_catalog(self):
         with tempfile.TemporaryDirectory() as root:
             conn = Mock()
+            conn.transaction.return_value.__enter__ = Mock()
+            conn.transaction.return_value.__exit__ = Mock(return_value=False)
             with patch("external_catalog.profile_database", side_effect=RuntimeError("DB failure")):
                 with self.assertRaises(RuntimeError):
                     build_external_catalog(conn, datasource_id="test", schema="public", root=Path(root))
