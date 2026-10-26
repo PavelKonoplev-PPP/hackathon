@@ -125,9 +125,9 @@ export function resultsFromMessages(messages) {
   return out
 }
 
-export async function createDashboardFromMessages(title, messages) {
+export async function createDashboardFromMessages(title, messages, datasourceId = null) {
   const widgets = resultsFromMessages(messages).map(widgetFromResult)
-  return dashboardsApi.create({ title, description: 'Собран автоматически из диалога', widgets })
+  return dashboardsApi.create({ title, description: 'Собран автоматически из диалога', datasource_id: datasourceId || 'raw', widgets })
 }
 
 const DASH_WORD = /дашборд|панел[ьи]/

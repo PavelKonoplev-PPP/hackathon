@@ -8,7 +8,7 @@ import { AppContext } from './lib/appContext.js'
 import { useConversations } from './lib/store.js'
 import { dashboardsApi } from './lib/dashboardsApi.js'
 import { dashboardHref, go, useRoute } from './lib/router.js'
-import { isMock } from './lib/api.js'
+import { isMock, listDatasources } from './lib/api.js'
 
 export default function App() {
   const route = useRoute()
@@ -16,6 +16,7 @@ export default function App() {
   const [dashboards, setDashboards] = useState([])
   const [dashboardsError, setDashboardsError] = useState(null)
   const [toast, setToast] = useState(null)
+  const [datasources, setDatasources] = useState([])
 
   const refreshDashboards = useCallback(async () => {
     try {
@@ -33,8 +34,23 @@ export default function App() {
     refreshDashboards()
   }, [refreshDashboards, route.page])
 
+  const refreshDatasources = useCallback(async () => {
+    try {
+      setDatasources(await listDatasources())
+    } catch {
+      setDatasources([]) // без списка чат работает со встроенным источником
+    }
+  }, [])
+
   useEffect(() => {
-    const onFocus = () => refreshDashboards()
+    refreshDatasources()
+  }, [refreshDatasources])
+
+  useEffect(() => {
+    const onFocus = () => {
+      refreshDashboards()
+      refreshDatasources()
+    }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshDashboards])
@@ -47,7 +63,7 @@ export default function App() {
     return () => clearTimeout(t)
   }, [toast])
 
-  const { conversations, active, loadingIds, create, select, remove, send, setView, rename, buildDashboard } = useConversations({
+  const { conversations, active, loadingIds, create, select, remove, send, setView, rename, buildDashboard, setDatasource } = useConversations({
     onDashboardCreated: refreshDashboards,
   })
 
@@ -63,7 +79,18 @@ export default function App() {
     }
   }
 
-  const ctx = useMemo(() => ({ dashboards, dashboardsError, refreshDashboards, notify }), [dashboards, dashboardsError, refreshDashboards, notify])
+  function onChangeDatasource(id, datasourceId) {
+    const startedNew = setDatasource(id, datasourceId)
+    if (startedNew) {
+      const name = datasources.find((d) => d.id === datasourceId)?.name || datasourceId
+      notify(`Начат новый диалог с источником «${name}» — контекст прошлого источника не переносится`)
+    }
+  }
+
+  const ctx = useMemo(
+    () => ({ dashboards, dashboardsError, refreshDashboards, notify, datasources }),
+    [dashboards, dashboardsError, refreshDashboards, notify, datasources]
+  )
 
   return (
     <AppContext.Provider value={ctx}>
@@ -119,6 +146,7 @@ export default function App() {
                 onSend={send}
                 onChangeView={setView}
                 onBuildDashboard={onBuildDashboard}
+                onChangeDatasource={onChangeDatasource}
               />
             )}
             {route.page === 'dashboards' && <DashboardsPage />}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { sendMessage } from './api.js'
-import { detectViewRequest, viewPhrase } from './chartViews.js'
+import { detectViewRequest, pieProblem, viewPhrase } from './chartViews.js'
 import { createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
 import { dashboardHref } from './router.js'
 
@@ -9,9 +9,9 @@ const TITLE_MAX = 40
 
 const uuid = () => crypto.randomUUID()
 
-function newConversation() {
+function newConversation(datasourceId = null) {
   const now = Date.now()
-  return { id: uuid(), sessionId: uuid(), title: 'Новый диалог', messages: [], createdAt: now, updatedAt: now }
+  return { id: uuid(), sessionId: uuid(), datasourceId, title: 'Новый диалог', messages: [], createdAt: now, updatedAt: now }
 }
 
 function makeTitle(text) {
@@ -79,9 +79,23 @@ export function useConversations({ onDashboardCreated } = {}) {
   async function buildDashboard(id) {
     const conv = stateRef.current.conversations.find((c) => c.id === id)
     if (!conv || resultsFromMessages(conv.messages).length === 0) return null
-    const d = await createDashboardFromMessages(`Дашборд: ${conv.title}`, conv.messages)
+    const d = await createDashboardFromMessages(`Дашборд: ${conv.title}`, conv.messages, conv.datasourceId)
     onCreatedRef.current?.()
     return d
+  }
+
+  // Источник диалога. У диалога с сообщениями источник не меняем: начинаем новый диалог
+  // с новым session_id, чтобы контекст и кэши прошлой базы не смешивались с новой.
+  const setDatasource = (id, datasourceId) => {
+    const conv = stateRef.current.conversations.find((c) => c.id === id)
+    if (!conv || (conv.datasourceId || null) === (datasourceId || null)) return false
+    if (conv.messages.length === 0) {
+      update(id, (c) => ({ ...c, datasourceId, sessionId: uuid() }))
+      return false
+    }
+    const c = newConversation(datasourceId)
+    setState((s) => ({ conversations: [c, ...s.conversations], activeId: c.id }))
+    return true
   }
 
   const select = (id) => setState((s) => ({ ...s, activeId: id }))
@@ -107,14 +121,17 @@ export function useConversations({ onDashboardCreated } = {}) {
     const wantedView = detectViewRequest(message)
     const source = wantedView && [...conv.messages].reverse().find((m) => m.chart)
     if (source) {
+      const problem = wantedView === 'pie' && pieProblem(source.chart)
       const botMsg = {
         id: uuid(),
         role: 'assistant',
-        text: `Вот то же самое ${viewPhrase(wantedView)}.`,
+        text: problem
+          ? `Круговую диаграмму здесь построить нельзя: ${problem}. Показываю гистограммой.`
+          : `Вот то же самое ${viewPhrase(wantedView)}.`,
         chart: source.chart,
         table: source.table,
         sql: source.sql,
-        view: wantedView,
+        view: problem ? 'bar' : wantedView,
       }
       update(id, (c) => ({ ...c, messages: [...c.messages, userMsg, botMsg], updatedAt: Date.now() }))
       return
@@ -164,7 +181,7 @@ export function useConversations({ onDashboardCreated } = {}) {
 
     let botMsg
     try {
-      const reply = await sendMessage(conv.sessionId, message)
+      const reply = await sendMessage(conv.sessionId, message, conv.datasourceId)
       botMsg = {
         id: uuid(),
         role: 'assistant',
@@ -199,5 +216,6 @@ export function useConversations({ onDashboardCreated } = {}) {
     setView,
     rename,
     buildDashboard,
+    setDatasource,
   }
 }

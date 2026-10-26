@@ -2,7 +2,7 @@ import { useState } from 'react'
 import ResultView from './ResultView.jsx'
 import AddToDashboard from './AddToDashboard.jsx'
 
-export default function Message({ msg, question, onPickOption, onChangeView }) {
+export default function Message({ msg, question, datasourceId, onPickOption, onChangeView }) {
   const [showSql, setShowSql] = useState(false)
   const isUser = msg.role === 'user'
   const hasResult = !msg.error && (msg.chart || msg.table)
@@ -51,7 +51,7 @@ export default function Message({ msg, question, onPickOption, onChangeView }) {
               </button>
             )}
             {hasResult && (
-              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view }} />
+              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, datasourceId }} />
             )}
           </div>
         )}
