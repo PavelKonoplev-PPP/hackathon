@@ -23,6 +23,27 @@ class CSVServiceTests(unittest.TestCase):
             self.assertEqual(result["columns"], ["Код", "Цена", "Код__2"])
             self.assertEqual(result["rows"][0], ["00123", "15,50", "A"])
 
+    def test_semicolon_currency_column_and_decimal_commas(self):
+        # Regression: Sniffer chose ',' and split the header into 2 columns.
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(
+                folder, "bi_smoke_orders.csv",
+                "Номер заказа;Город;Выручка, руб.;Дата\n"
+                "001;Москва;100,50;2026-10-20\n"
+                "002;Казань;200,00;2026-10-21\n"
+                "003;Москва;50,50;2026-10-22\n",
+            )
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ";")
+            self.assertEqual(
+                result["columns"],
+                ["Номер заказа", "Город", "Выручка, руб.", "Дата"],
+            )
+            self.assertEqual(len(result["rows"]), 3)
+            self.assertEqual(result["rows"][0][0], "001")
+            self.assertEqual(result["rows"][0][2], "100,50")
+            self.assertEqual(result["warnings"], [])
+
     def test_comma_delimiter_with_quotes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = self.make_csv(folder, "sales.csv",
