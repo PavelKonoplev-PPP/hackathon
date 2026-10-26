@@ -1,39 +1,34 @@
-import { useMemo, useState } from 'react'
-import ChartView from './ChartView.jsx'
-import DataTable from './DataTable.jsx'
-import { VIEWS, deriveTable } from '../lib/chartViews.js'
+import { useState } from 'react'
+import ResultView from './ResultView.jsx'
+import AddToDashboard from './AddToDashboard.jsx'
 
-export default function Message({ msg, onPickOption, onChangeView }) {
+export default function Message({ msg, question, onPickOption, onChangeView }) {
   const [showSql, setShowSql] = useState(false)
   const isUser = msg.role === 'user'
-  const view = msg.view || msg.chart?.type
-  const chartSpec = useMemo(
-    () => (msg.chart && view !== 'table' ? { ...msg.chart, type: view } : null),
-    [msg.chart, view]
-  )
+  const hasResult = !msg.error && (msg.chart || msg.table)
+  const title = msg.chart?.title || question || 'Результат'
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
-      <div className={`bubble ${msg.error ? 'bubble-error' : ''}`}>
+      <div className={`bubble ${msg.error ? 'bubble-error' : ''} ${hasResult ? 'bubble-wide' : ''}`}>
         <p className="text">{msg.text}</p>
 
-        {msg.chart && (
-          <div className="view-switch" role="group" aria-label="Вид отображения">
-            {VIEWS.map((v) => (
-              <button
-                key={v.id}
-                className={v.id === view ? 'view-on' : ''}
-                aria-pressed={v.id === view}
-                onClick={() => onChangeView(msg.id, v.id)}
-              >
-                {v.label}
-              </button>
-            ))}
-          </div>
+        {hasResult && (
+          <ResultView
+            chart={msg.chart}
+            table={msg.table}
+            view={msg.view}
+            onChangeView={(v) => onChangeView(msg.id, v)}
+            title={title}
+            extraTable
+          />
         )}
-        {chartSpec && <ChartView spec={chartSpec} />}
-        {view === 'table' && msg.chart && <DataTable table={msg.table || deriveTable(msg.chart)} />}
-        {msg.table && !(view === 'table' && msg.chart) && <DataTable table={msg.table} />}
+
+        {msg.link && (
+          <a className="link-btn" href={msg.link.href}>
+            {msg.link.label}
+          </a>
+        )}
 
         {msg.clarification && (
           <div className="clarify">
@@ -48,14 +43,19 @@ export default function Message({ msg, onPickOption, onChangeView }) {
           </div>
         )}
 
-        {msg.sql && (
-          <div className="sql">
-            <button className="link" onClick={() => setShowSql((v) => !v)}>
-              {showSql ? 'Скрыть, как посчитано' : 'Как посчитано'}
-            </button>
-            {showSql && <pre>{msg.sql}</pre>}
+        {(msg.sql || hasResult) && (
+          <div className="msg-actions">
+            {msg.sql && (
+              <button className="link" onClick={() => setShowSql((v) => !v)}>
+                {showSql ? 'Скрыть, как посчитано' : 'Как посчитано'}
+              </button>
+            )}
+            {hasResult && (
+              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view }} />
+            )}
           </div>
         )}
+        {showSql && msg.sql && <pre className="sql-code">{msg.sql}</pre>}
       </div>
     </div>
   )
