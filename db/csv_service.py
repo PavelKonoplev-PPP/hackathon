@@ -68,7 +68,7 @@ def _delimiter_for(sample: str, requested: str | None) -> tuple[str, bool]:
             return best[0], False
         # При равной ширине даём Sniffer право разрешить неоднозначность.
         try:
-            detected = csv.Sniffer().sniff(sample, delimiters=";,\\t|").delimiter
+            detected = csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
             if detected in best:
                 return detected, False
         except csv.Error:
