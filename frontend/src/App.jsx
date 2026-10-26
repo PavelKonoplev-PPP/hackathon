@@ -27,8 +27,16 @@ export default function App() {
     }
   }, [])
 
+  // Список обновляем при входе в раздел дашбордов и при возврате на вкладку:
+  // если бэкенд был недоступен при загрузке страницы, список подтянется позже.
   useEffect(() => {
     refreshDashboards()
+  }, [refreshDashboards, route.page])
+
+  useEffect(() => {
+    const onFocus = () => refreshDashboards()
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
   }, [refreshDashboards])
 
   const notify = useCallback((text, href) => setToast({ text, href, key: Date.now() }), [])
@@ -85,6 +93,8 @@ export default function App() {
             activeId={active.id}
             loadingIds={loadingIds}
             dashboards={dashboards}
+            dashboardsError={dashboardsError}
+            onRetryDashboards={refreshDashboards}
             route={route}
             open={menuOpen}
             onClose={() => setMenuOpen(false)}

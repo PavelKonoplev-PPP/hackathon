@@ -65,7 +65,7 @@ function DialogItem({ conv, active, busy, onSelect, onDelete, onRename }) {
 const matches = (text, q) => (text || '').toLowerCase().includes(q)
 
 // Боковая панель: поиск (BI-24), диалоги с переименованием (BI-21, BI-23) и дашборды.
-export default function Sidebar({ conversations, activeId, loadingIds, dashboards, route, open, onCreate, onSelect, onDelete, onRename, onClose }) {
+export default function Sidebar({ conversations, activeId, loadingIds, dashboards, dashboardsError, onRetryDashboards, route, open, onCreate, onSelect, onDelete, onRename, onClose }) {
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
   const dialogs = q ? conversations.filter((c) => matches(c.title, q) || c.messages.some((m) => matches(m.text, q))) : conversations
@@ -126,7 +126,15 @@ export default function Sidebar({ conversations, activeId, loadingIds, dashboard
           ))}
         </ul>
         {q && dashes.length === 0 && dashboards.length > 0 && <p className="muted small">Дашбордов не найдено</p>}
-        {dashboards.length === 0 && <p className="muted small">Пока нет. Добавьте график из чата кнопкой «+ На дашборд».</p>}
+        {dashboardsError && (
+          <p className="error-text small">
+            Не удалось загрузить дашборды.{' '}
+            <button className="link" onClick={onRetryDashboards}>
+              Повторить
+            </button>
+          </p>
+        )}
+        {!dashboardsError && dashboards.length === 0 && <p className="muted small">Пока нет. Добавьте график из чата кнопкой «+ На дашборд».</p>}
       </aside>
     </>
   )
