@@ -23,6 +23,45 @@ class CSVServiceTests(unittest.TestCase):
             self.assertEqual(result["columns"], ["Код", "Цена", "Код__2"])
             self.assertEqual(result["rows"][0], ["00123", "15,50", "A"])
 
+    def test_semicolon_currency_column_and_decimal_commas(self):
+        # Regression: Sniffer chose ',' and split the header into 2 columns.
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(
+                folder, "bi_smoke_orders.csv",
+                "Номер заказа;Город;Выручка, руб.;Дата\n"
+                "001;Москва;100,50;2026-10-20\n"
+                "002;Казань;200,00;2026-10-21\n"
+                "003;Москва;50,50;2026-10-22\n",
+            )
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ";")
+            self.assertEqual(
+                result["columns"],
+                ["Номер заказа", "Город", "Выручка, руб.", "Дата"],
+            )
+            self.assertEqual(len(result["rows"]), 3)
+            self.assertEqual(result["rows"][0][0], "001")
+            self.assertEqual(result["rows"][0][2], "100,50")
+            self.assertEqual(result["warnings"], [])
+
+    def test_quoted_other_delimiters_are_not_column_separators(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(folder, "pipe_in_quote.csv",
+                                 'id,"a|b|c"\n1,"x|y|z"\n')
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ",")
+            self.assertEqual(result["columns"], ["id", "a|b|c"])
+            self.assertEqual(result["rows"], [["1", "x|y|z"]])
+
+    def test_long_quoted_field_truncated_in_sniff_sample(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(folder, "long_value.csv",
+                                 'a,b\n1,"' + "x" * 40000 + '"\n')
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ",")
+            self.assertEqual(result["columns"], ["a", "b"])
+            self.assertEqual(result["rows"][0][1], "x" * 40000)
+
     def test_comma_delimiter_with_quotes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = self.make_csv(folder, "sales.csv",
