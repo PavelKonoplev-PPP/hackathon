@@ -286,3 +286,31 @@ class DashboardDetail(BaseModel):
     widgets: list[DashboardWidget] = Field(default_factory=list)
     created_at: str
     updated_at: str
+
+
+# CSV Upload & Preview schemas
+class CsvPreviewResponse(BaseModel):
+    """Result of CSV format sniffing and preview."""
+
+    filename: str
+    schema_name: str = "raw"
+    table_name: str
+    encoding: str
+    delimiter: str
+    original_headers: list[str]
+    columns: list[str]
+    rows: list[list[Any]]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class CsvUploadResponse(BaseModel):
+    """Result of importing CSV table and refreshing catalog."""
+
+    status: str = "ok"
+    schema_name: str = "raw"
+    table_name: str
+    row_count: int
+    columns: list[str]
+    warnings: list[str] = Field(default_factory=list)
+    catalog_refreshed: bool = True
+    message: str | None = None
