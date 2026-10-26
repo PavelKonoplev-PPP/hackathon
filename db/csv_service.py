@@ -5,6 +5,8 @@
 """
 
 import csv
+from io import StringIO
+from itertools import islice
 from pathlib import Path
 
 try:
@@ -40,16 +42,41 @@ def _delimiter_for(sample: str, requested: str | None) -> tuple[str, bool]:
         if requested not in DELIMITERS:
             raise ValueError("Разделитель должен быть ; , TAB или |")
         return requested, False
-    try:
-        detected = csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
-        if detected in DELIMITERS:
-            return detected, False
-    except csv.Error:
-        pass
-    # Для одноколоночных CSV разделитель не обнаруживается однозначно.
-    # Не угадываем из текста: используем ; и сообщаем об этом пользователю.
-    return ";", True
 
+    # Sniffer иногда принимает десятичную запятую за разделитель:
+    # «Код;Выручка, руб.\\n001;100,50» распознаётся как CSV с запятыми.
+    # Проверяем ширину заголовка и согласованность нескольких записей для
+    # КАЖДОГО поддерживаемого разделителя. Предпочитаем больше колонок.
+    candidates = []
+    for candidate in DELIMITERS:
+        try:
+            reader = csv.reader(StringIO(sample), delimiter=candidate, strict=True)
+            rows = [row for row in islice(reader, 12) if row]
+        except csv.Error:
+            continue
+        if not rows or len(rows[0]) < 2:
+            continue
+        width = len(rows[0])
+        if any(len(row) != width for row in rows[1:]):
+            continue
+        candidates.append((width, candidate))
+
+    if candidates:
+        width = max(candidate[0] for candidate in candidates)
+        best = [candidate for count, candidate in candidates if count == width]
+        if len(best) == 1:
+            return best[0], False
+        # При равной ширине даём Sniffer право разрешить неоднозначность.
+        try:
+            detected = csv.Sniffer().sniff(sample, delimiters=";,\\t|").delimiter
+            if detected in best:
+                return detected, False
+        except csv.Error:
+            pass
+        return best[0], True
+
+    # Одноколоночный или неоднозначный файл: прежний fallback с предупреждением.
+    return ";", True
 
 def preview_csv(
     path: Path,
