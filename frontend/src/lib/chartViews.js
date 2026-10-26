@@ -1,9 +1,9 @@
 // Виды отображения результата и распознавание просьбы «покажи иначе».
 
 export const VIEWS = [
-  { id: 'bar', label: 'Столбцы' },
-  { id: 'line', label: 'Линия' },
-  { id: 'pie', label: 'Круг' },
+  { id: 'bar', label: 'Гистограмма' },
+  { id: 'line', label: 'Линейный' },
+  { id: 'pie', label: 'Круговая' },
   { id: 'table', label: 'Таблица' },
 ]
 
