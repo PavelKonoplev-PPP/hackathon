@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import Message from './Message.jsx'
+import { AppContext } from '../lib/appContext.js'
 
 const SUGGESTIONS = [
   'Опиши данные',
@@ -7,7 +8,8 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-export default function Chat({ conversation, loading, onSend, onChangeView, onBuildDashboard }) {
+export default function Chat({ conversation, loading, onSend, onChangeView, onBuildDashboard, onChangeDatasource }) {
+  const { datasources } = useContext(AppContext)
   const [input, setInput] = useState('')
   const [building, setBuilding] = useState(false)
   const endRef = useRef(null)
@@ -44,12 +46,32 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
 
   return (
     <div className="chat">
-      {resultCount > 0 && (
+      {(resultCount > 0 || datasources.length > 1) && (
         <div className="chat-head">
-          <span className="muted small">Результатов в диалоге: {resultCount}</span>
-          <button className="ghost" onClick={build} disabled={building}>
-            {building ? 'Собираю…' : 'Собрать дашборд'}
-          </button>
+          {datasources.length > 1 ? (
+            <label className="source-pick">
+              <span className="muted small">Источник</span>
+              <select
+                value={conversation.datasourceId || datasources.find((d) => d.is_default)?.id || ''}
+                onChange={(e) => onChangeDatasource(conversation.id, e.target.value)}
+                disabled={loading}
+              >
+                {datasources.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                    {d.tables_count ? ` · таблиц: ${d.tables_count}` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <span className="muted small">Результатов в диалоге: {resultCount}</span>
+          )}
+          {resultCount > 0 && (
+            <button className="ghost" onClick={build} disabled={building}>
+              {building ? 'Собираю…' : 'Собрать дашборд'}
+            </button>
+          )}
         </div>
       )}
       <div className="messages">
@@ -74,6 +96,7 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
               key={m.id}
               msg={m}
               question={m.role === 'assistant' ? question : null}
+              datasourceId={conversation.datasourceId}
               onPickOption={send}
               onChangeView={(msgId, view) => onChangeView(conversation.id, msgId, view)}
             />

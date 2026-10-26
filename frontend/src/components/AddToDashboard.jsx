@@ -44,7 +44,11 @@ export default function AddToDashboard({ result }) {
     e.preventDefault()
     setBusy(true)
     try {
-      const d = await dashboardsApi.create({ title: newTitle.trim() || result.title || 'Новый дашборд', widgets: [widgetFromResult(result)] })
+      const d = await dashboardsApi.create({
+        title: newTitle.trim() || result.title || 'Новый дашборд',
+        datasource_id: result.datasourceId || 'raw',
+        widgets: [widgetFromResult(result)],
+      })
       notify(`Создан дашборд «${d.title}»`, dashboardHref(d.id))
       setOpen(false)
       setNewTitle('')
