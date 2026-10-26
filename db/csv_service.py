@@ -37,45 +37,84 @@ def _source_name(filename: str) -> str:
     return filename
 
 
-def _delimiter_for(sample: str, requested: str | None) -> tuple[str, bool]:
+def _header_delimiter_counts(sample: str) -> dict[str, int]:
+    """Count separators in the first complete logical CSV header outside quotes.
+
+    Quote tracking is independent of the candidate separator so a "|" inside
+    the quoted field of a comma CSV cannot win by being the widest candidate.
+    """
+    counts = {separator: 0 for separator in DELIMITERS}
+    quoted = False
+    i = 0
+    while i < len(sample):
+        char = sample[i]
+        if char == '"':
+            if quoted and i + 1 < len(sample) and sample[i + 1] == '"':
+                i += 2
+                continue
+            quoted = not quoted
+        elif not quoted and char in "\r\n":
+            break
+        elif not quoted and char in counts:
+            counts[char] += 1
+        i += 1
+    return counts
+
+
+def _delimiter_for(sample: str, requested: str | None,
+                   sample_truncated: bool = False) -> tuple[str, bool]:
     if requested is not None:
         if requested not in DELIMITERS:
             raise ValueError("Разделитель должен быть ; , TAB или |")
         return requested, False
 
-    # Sniffer иногда принимает десятичную запятую за разделитель:
-    # «Код;Выручка, руб.\\n001;100,50» распознаётся как CSV с запятыми.
-    # Проверяем ширину заголовка и согласованность нескольких записей для
-    # КАЖДОГО поддерживаемого разделителя. Предпочитаем больше колонок.
+    header_counts = _header_delimiter_counts(sample)
     candidates = []
     for candidate in DELIMITERS:
-        try:
-            reader = csv.reader(StringIO(sample), delimiter=candidate, strict=True)
-            rows = [row for row in islice(reader, 12) if row]
-        except csv.Error:
+        if not header_counts[candidate]:
             continue
-        if not rows or len(rows[0]) < 2:
+        reader = csv.reader(StringIO(sample), delimiter=candidate, strict=True)
+        rows = []
+        failed = False
+        try:
+            for row in islice(reader, 12):
+                if row:
+                    rows.append(row)
+        except csv.Error:
+            failed = True
+        # Ignore the last partial row of the bounded sample; a long quoted
+        # field may be cut at SNIFF_BYTES without making the CSV invalid.
+        if failed:
+            if not sample_truncated:
+                continue
+        elif sample_truncated and not sample.endswith(("\r", "\n")):
+            rows = rows[:-1]
+
+        if not rows:
             continue
         width = len(rows[0])
+        if width != header_counts[candidate] + 1:
+            # Quotes recognized as literal chars by the *wrong* dialect
+            # can split a quoted field at its internal separators.
+            continue
         if any(len(row) != width for row in rows[1:]):
             continue
-        candidates.append((width, candidate))
+        candidates.append((width, candidate, len(rows)))
 
     if candidates:
         width = max(candidate[0] for candidate in candidates)
-        best = [candidate for count, candidate in candidates if count == width]
+        best = [item for item in candidates if item[0] == width]
         if len(best) == 1:
-            return best[0], False
-        # При равной ширине даём Sniffer право разрешить неоднозначность.
+            return best[0][1], False
         try:
             detected = csv.Sniffer().sniff(sample, delimiters=";,\t|").delimiter
-            if detected in best:
+            if detected in {item[1] for item in best}:
                 return detected, False
         except csv.Error:
             pass
-        return best[0], True
+        return best[0][1], True
 
-    # Одноколоночный или неоднозначный файл: прежний fallback с предупреждением.
+    # For one-column or inconclusive files, expose the uncertainty to the UI.
     return ";", True
 
 def preview_csv(
@@ -103,7 +142,11 @@ def preview_csv(
     try:
         with path.open("r", encoding=encoding, newline="") as handle:
             sample = handle.read(SNIFF_BYTES)
-            chosen_delimiter, fallback = _delimiter_for(sample, delimiter)
+            # Read only one extra character to tell EOF from a truncated sample.
+            sample_truncated = bool(handle.read(1))
+            chosen_delimiter, fallback = _delimiter_for(
+                sample, delimiter, sample_truncated=sample_truncated
+            )
             handle.seek(0)
             reader = csv.reader(handle, delimiter=chosen_delimiter, strict=True)
             headers = next(reader, None)
