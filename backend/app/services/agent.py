@@ -384,12 +384,22 @@ def process_chat_message(
     runner: Any = None,
     datasource_id: str | None = None,
     table_name: str | None = None,
+    recorder: Any = None,
 ) -> dict:
-    """Process a chat message conforming to docs/api-contract.md.
+    """Process a chat message conforming to docs/api-contract.md with BI-07 status tracking.
 
     Uses teammate's describe_data / answer_question when available,
     otherwise falls back to basic chat completion.
     """
+    if recorder is None:
+        try:
+            from .query_tracker import StepRecorder
+            recorder = StepRecorder()
+        except Exception:
+            recorder = None
+
+    if recorder:
+        recorder.step("parse_intent", "Анализ вопроса и проверка безопасности")
     # 0. Context isolation when switching datasources within the same session
     if session_id:
         active_ds = (datasource_id or "raw").strip().lower()
@@ -407,12 +417,26 @@ def process_chat_message(
     # 1. Защита от деструктивных операций (DDL/DML)
     mutation = check_destructive_mutation(message)
     if mutation:
-        return mutation.to_dict()
+        if recorder:
+            recorder.finish("completed")
+        res = mutation.to_dict()
+        if recorder:
+            res["status"] = "refused"
+            res["steps"] = [s.model_dump() for s in recorder.steps]
+            res["execution_time_ms"] = recorder.total_duration_ms
+        return res
 
     # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете
     out_of_scope = detect_out_of_scope(message)
     if out_of_scope:
-        return out_of_scope.to_dict()
+        if recorder:
+            recorder.finish("completed")
+        res = out_of_scope.to_dict()
+        if recorder:
+            res["status"] = "refused"
+            res["steps"] = [s.model_dump() for s in recorder.steps]
+            res["execution_time_ms"] = recorder.total_duration_ms
+        return res
 
     if HAS_LLM_MODULE:
         if catalog is None:
@@ -455,23 +479,41 @@ def process_chat_message(
             if not is_single_table_scoped:
                 ambiguous = detect_ambiguous_query(message)
                 if ambiguous:
-                    return ambiguous.to_dict()
+                    if recorder:
+                        recorder.finish("completed")
+                    res = ambiguous.to_dict()
+                    if recorder:
+                        res["status"] = "clarification"
+                        res["steps"] = [s.model_dump() for s in recorder.steps]
+                        res["execution_time_ms"] = recorder.total_duration_ms
+                    return res
 
         if is_describe_intent(message):
+            if recorder:
+                recorder.step("describe_data", "Формирование описания структуры данных")
             try:
                 res = describe_data(
                     catalog,
                     relationships=relationships,
                     table_name=table_name,
                 )
-                return {
+                if recorder:
+                    recorder.finish("completed")
+                out = {
                     "answer": res.get("answer", ""),
                     "chart": res.get("chart"),
                     "table": res.get("table"),
                     "sql": res.get("sql"),
                     "clarification": res.get("clarification"),
                 }
+                if recorder:
+                    out["status"] = "completed"
+                    out["steps"] = [s.model_dump() for s in recorder.steps]
+                    out["execution_time_ms"] = recorder.total_duration_ms
+                return out
             except Exception as exc:
+                if recorder:
+                    recorder.finish("failed")
                 raise AgentServiceError(f"Ошибка при описании данных: {exc}") from exc
 
         # Analytical SQL query
@@ -506,6 +548,13 @@ def process_chat_message(
                     ) from exc
 
         try:
+            if recorder:
+                recorder.step("answer_query", "Генерация SQL и выполнение аналитического запроса")
+
+            def _on_progress(msg: str) -> None:
+                if recorder:
+                    recorder.step("query_execution", msg)
+
             res = answer_question(
                 message,
                 catalog,
@@ -513,15 +562,28 @@ def process_chat_message(
                 session_id=session_id,
                 table_name=table_name,
                 datasource_id=datasource_id,
+                progress=_on_progress,
             )
-            return {
+            if recorder:
+                recorder.step("synthesize", "Синтез ответа и визуализации")
+                final_status = "clarification" if res.get("clarification") else "completed"
+                recorder.finish(final_status)
+
+            out = {
                 "answer": res.get("answer", ""),
                 "chart": res.get("chart"),
                 "table": res.get("table"),
                 "sql": res.get("sql"),
                 "clarification": res.get("clarification"),
             }
+            if recorder:
+                out["status"] = "clarification" if res.get("clarification") else "completed"
+                out["steps"] = [s.model_dump() for s in recorder.steps]
+                out["execution_time_ms"] = recorder.total_duration_ms
+            return out
         except Exception as exc:
+            if recorder:
+                recorder.finish("failed")
             raise AgentServiceError(f"Ошибка при ответе на вопрос: {exc}") from exc
         finally:
             if conn is not None:

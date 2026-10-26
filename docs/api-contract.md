@@ -425,3 +425,85 @@ Content-Type: `multipart/form-data`
   "message": "Таблица успешно импортирована, каталог обновлён."
 }
 ```
+
+
+---
+
+## Сохранённые аналитические запросы (BI-35 / Issue #60)
+
+### 1. GET /api/queries (алиасы: `/api/saved-queries`, `/queries`)
+Возвращает список сохранённых запросов.
+Query параметры:
+- `datasource_id` (необязательный): фильтр по источнику.
+- `tag` (необязательный): фильтр по тегу.
+- `search` (необязательный): подстрочный поиск по заголовку, вопросу, описанию и SQL.
+
+### 2. POST /api/queries (алиасы: `/api/saved-queries`, `/queries`)
+Создание нового сохранённого запроса.
+Тело (JSON):
+```json
+{
+  "title": "Выручка по каналам",
+  "description": "Агрегированная выручка за всё время",
+  "question": "Какой канал продаж приносит больше всего выручки?",
+  "sql": "SELECT channel, SUM(amount) AS revenue FROM t GROUP BY channel ORDER BY revenue DESC",
+  "datasource_id": "raw",
+  "table_name": "data_03_orders",
+  "tags": ["revenue", "sales", "kpi"],
+  "chart_config": {"type": "bar"}
+}
+```
+
+### 3. GET /api/queries/{id}
+Получение детальной информации о сохранённом запросе.
+
+### 4. PUT /api/queries/{id}
+Обновление полей сохранённого запроса.
+
+### 5. DELETE /api/queries/{id}
+Удаление сохранённого запроса (HTTP 204).
+
+### 6. POST /api/queries/{id}/execute
+Выполнение сохранённого запроса с возвратом актуальных данных таблицы и графика.
+
+---
+
+## Статусы выполнения аналитического запроса (BI-07 / Issue #35)
+
+### 1. Статусы и шаги в ответах POST /api/chat
+В ответ `ChatResponse` включены поля жизненного цикла:
+- `status`: `"completed"` | `"clarification"` | `"refused"` | `"failed"`
+- `steps`: массив шагов выполнения с замерами времени (`duration_ms`):
+  - `parse_intent`: анализ намерения и проверка безопасности (DDL/DML, out-of-scope).
+  - `route_table`: выбор таблицы и сопоставление схемы.
+  - `generate_sql`: генерация и валидация SQL.
+  - `execute_sql`: выполнение запроса в PostgreSQL.
+  - `synthesize`: построение ответа, таблицы и графика.
+- `execution_time_ms`: общее время обработки запроса в миллисекундах.
+
+### 2. Асинхронное выполнение: POST /api/chat/jobs (алиас: POST /api/queries/jobs)
+Приём запроса на фоновое выполнение с возвратом `job_id` (HTTP 202 Accepted).
+```json
+{
+  "job_id": "c1f7a28e9b14",
+  "status": "pending",
+  "message": "Query execution job submitted successfully"
+}
+```
+
+### 3. Опрос статуса задачи: GET /api/chat/jobs/{job_id}
+Возвращает текущую фазу, процент выполнения и шаги:
+```json
+{
+  "job_id": "c1f7a28e9b14",
+  "status": "running",
+  "current_step": "Генерация аналитического SQL",
+  "progress_pct": 60,
+  "steps": [],
+  "result": null,
+  "execution_time_ms": null
+}
+```
+
+### 4. SSE-стриминг шагов: GET /api/chat/stream?message=...
+Потоковая передача событий Server-Sent Events по мере прохождения фаз пайплайна и выдача финального результата.

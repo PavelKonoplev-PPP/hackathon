@@ -2,7 +2,8 @@ import logging
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
 from .schemas import (
     AskRequest,
@@ -21,13 +22,19 @@ from .schemas import (
     DataSourceTestRequest,
     DataSourceTestResponse,
     HealthResponse,
+    JobCreateResponse,
+    JobStatusResponse,
     RelationshipSchema,
+    SavedQuery,
+    SavedQueryCreateRequest,
+    SavedQueryExecuteResponse,
+    SavedQueryUpdateRequest,
     SchemaResponse,
     TableSchema,
 )
 from ..db.session import check_db, get_reader_connection, get_writer_connection
 from ..llm.client import LLMError
-from ..services import agent, dashboards, datasources
+from ..services import agent, dashboards, datasources, query_tracker, saved_queries
 
 logger = logging.getLogger(__name__)
 
@@ -577,3 +584,160 @@ def delete_dashboard_endpoint(dashboard_id: str) -> None:
     deleted = dashboards.delete_dashboard(dashboard_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Dashboard '{dashboard_id}' not found.")
+
+
+# -------------------------------------------------------------
+# Saved Analytical Queries (BI-35 / Issue #60)
+# -------------------------------------------------------------
+@router.get("/api/queries", response_model=list[SavedQuery])
+@router.get("/queries", response_model=list[SavedQuery])
+@router.get("/api/saved-queries", response_model=list[SavedQuery])
+@router.get("/saved-queries", response_model=list[SavedQuery])
+def list_saved_queries_endpoint(
+    datasource_id: str | None = None,
+    tag: str | None = None,
+    search: str | None = None,
+) -> list[SavedQuery]:
+    """List all saved analytical queries with optional filters."""
+    return saved_queries.list_saved_queries(
+        datasource_id=datasource_id, tag=tag, search=search
+    )
+
+
+@router.post("/api/queries", response_model=SavedQuery, status_code=201)
+@router.post("/queries", response_model=SavedQuery, status_code=201)
+@router.post("/api/saved-queries", response_model=SavedQuery, status_code=201)
+@router.post("/saved-queries", response_model=SavedQuery, status_code=201)
+def create_saved_query_endpoint(body: SavedQueryCreateRequest) -> SavedQuery:
+    """Create and persist a new saved analytical query."""
+    try:
+        return saved_queries.create_saved_query(body)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create query: {exc}") from exc
+
+
+@router.get("/api/queries/{query_id}", response_model=SavedQuery)
+@router.get("/queries/{query_id}", response_model=SavedQuery)
+@router.get("/api/saved-queries/{query_id}", response_model=SavedQuery)
+@router.get("/saved-queries/{query_id}", response_model=SavedQuery)
+def get_saved_query_endpoint(query_id: str) -> SavedQuery:
+    """Retrieve saved query details by ID."""
+    q = saved_queries.get_saved_query_by_id(query_id)
+    if not q:
+        raise HTTPException(status_code=404, detail=f"Query '{query_id}' not found.")
+    return q
+
+
+@router.put("/api/queries/{query_id}", response_model=SavedQuery)
+@router.put("/queries/{query_id}", response_model=SavedQuery)
+@router.put("/api/saved-queries/{query_id}", response_model=SavedQuery)
+@router.put("/saved-queries/{query_id}", response_model=SavedQuery)
+def update_saved_query_endpoint(query_id: str, body: SavedQueryUpdateRequest) -> SavedQuery:
+    """Update title, description, question, sql, or tags of a saved query."""
+    q = saved_queries.update_saved_query(query_id, body)
+    if not q:
+        raise HTTPException(status_code=404, detail=f"Query '{query_id}' not found.")
+    return q
+
+
+@router.delete("/api/queries/{query_id}", status_code=204)
+@router.delete("/queries/{query_id}", status_code=204)
+@router.delete("/api/saved-queries/{query_id}", status_code=204)
+@router.delete("/saved-queries/{query_id}", status_code=204)
+def delete_saved_query_endpoint(query_id: str) -> None:
+    """Delete a saved query by ID."""
+    deleted = saved_queries.delete_saved_query(query_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Query '{query_id}' not found.")
+
+
+@router.post("/api/queries/{query_id}/execute", response_model=SavedQueryExecuteResponse)
+@router.post("/queries/{query_id}/execute", response_model=SavedQueryExecuteResponse)
+@router.post("/api/saved-queries/{query_id}/execute", response_model=SavedQueryExecuteResponse)
+@router.post("/saved-queries/{query_id}/execute", response_model=SavedQueryExecuteResponse)
+def execute_saved_query_endpoint(query_id: str) -> SavedQueryExecuteResponse:
+    """Execute a saved analytical query and return fresh results."""
+    try:
+        return saved_queries.execute_saved_query(query_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Query execution failed: {exc}") from exc
+
+
+# -------------------------------------------------------------
+# Query Execution Statuses & Background Jobs (BI-07 / Issue #35)
+# -------------------------------------------------------------
+@router.post("/api/chat/jobs", response_model=JobCreateResponse, status_code=202)
+@router.post("/api/queries/jobs", response_model=JobCreateResponse, status_code=202)
+def start_query_job_endpoint(
+    body: ChatRequest,
+    background_tasks: BackgroundTasks,
+) -> JobCreateResponse:
+    """Submit an analytical query for asynchronous execution with progress tracking."""
+    job = query_tracker.create_job(
+        message=body.message,
+        session_id=body.session_id,
+        datasource_id=body.datasource_id,
+        table_name=body.table_name,
+    )
+    background_tasks.add_task(query_tracker.execute_job_worker, job.job_id)
+    return JobCreateResponse(
+        job_id=job.job_id,
+        status="pending",
+        message="Query execution job submitted successfully",
+    )
+
+
+@router.get("/api/chat/jobs/{job_id}", response_model=JobStatusResponse)
+@router.get("/api/queries/jobs/{job_id}", response_model=JobStatusResponse)
+@router.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
+def get_query_job_endpoint(job_id: str) -> JobStatusResponse:
+    """Retrieve execution status, current step, and results of an analytical query job."""
+    job = query_tracker.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return job
+
+
+@router.get("/api/chat/jobs", response_model=list[JobStatusResponse])
+@router.get("/api/queries/jobs", response_model=list[JobStatusResponse])
+def list_query_jobs_endpoint(limit: int = 50) -> list[JobStatusResponse]:
+    """List recent analytical query execution jobs."""
+    return query_tracker.list_jobs(limit=limit)
+
+
+@router.get("/api/chat/stream")
+def stream_chat_endpoint(
+    message: str,
+    session_id: str | None = None,
+    datasource_id: str | None = None,
+    table_name: str | None = None,
+) -> StreamingResponse:
+    """Server-Sent Events (SSE) endpoint streaming execution progress steps in real time."""
+    import json
+
+    def event_generator():
+        yield f"data: {json.dumps({'type': 'status', 'step': 'init', 'title': 'Инициализация запроса'})}\n\n"
+        recorder = query_tracker.StepRecorder()
+        try:
+            recorder.step("parse_intent", "Анализ вопроса и ограничений")
+            yield f"data: {json.dumps({'type': 'step', 'step': 'parse_intent', 'title': 'Анализ вопроса и ограничений', 'status': 'in_progress'})}\n\n"
+
+            result = agent.process_chat_message(
+                message=message,
+                session_id=session_id,
+                datasource_id=datasource_id,
+                table_name=table_name,
+                recorder=recorder,
+            )
+            for s in recorder.steps:
+                yield f"data: {json.dumps({'type': 'step', 'step': s.step, 'title': s.title, 'status': s.status, 'duration_ms': s.duration_ms})}\n\n"
+
+            chat_resp = ChatResponse(**result)
+            yield f"data: {json.dumps({'type': 'result', 'data': chat_resp.model_dump()})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
