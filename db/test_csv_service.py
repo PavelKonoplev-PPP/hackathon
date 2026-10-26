@@ -44,6 +44,24 @@ class CSVServiceTests(unittest.TestCase):
             self.assertEqual(result["rows"][0][2], "100,50")
             self.assertEqual(result["warnings"], [])
 
+    def test_quoted_other_delimiters_are_not_column_separators(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(folder, "pipe_in_quote.csv",
+                                 'id,"a|b|c"\n1,"x|y|z"\n')
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ",")
+            self.assertEqual(result["columns"], ["id", "a|b|c"])
+            self.assertEqual(result["rows"], [["1", "x|y|z"]])
+
+    def test_long_quoted_field_truncated_in_sniff_sample(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = self.make_csv(folder, "long_value.csv",
+                                 'a,b\n1,"' + "x" * 40000 + '"\n')
+            result = preview_csv(path)
+            self.assertEqual(result["delimiter"], ",")
+            self.assertEqual(result["columns"], ["a", "b"])
+            self.assertEqual(result["rows"][0][1], "x" * 40000)
+
     def test_comma_delimiter_with_quotes(self):
         with tempfile.TemporaryDirectory() as folder:
             path = self.make_csv(folder, "sales.csv",
