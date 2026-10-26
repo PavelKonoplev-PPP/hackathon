@@ -51,3 +51,14 @@ export function detectViewRequest(text) {
   const extra = (rest.match(/[а-яёa-z0-9]+/g) || []).filter((w) => !FILLER.has(w))
   return extra.length ? null : hit[0]
 }
+
+export const PIE_MAX_PARTS = 12
+
+// Круговая показывает доли одной величины: одна серия, не больше 12 частей, без отрицательных значений.
+export function pieProblem(chart) {
+  if (!chart) return null
+  if (chart.series.length !== 1) return `в графике ${chart.series.length} величины, а круговая показывает доли только одной`
+  if (chart.categories.length > PIE_MAX_PARTS) return `частей больше ${PIE_MAX_PARTS} — круг станет нечитаемым`
+  if (chart.series[0].data.some((v) => typeof v === 'number' && v < 0)) return 'есть отрицательные значения'
+  return null
+}

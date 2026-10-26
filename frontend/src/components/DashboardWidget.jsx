@@ -5,7 +5,7 @@ import InlineEdit from './InlineEdit.jsx'
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 
 // Виджет дашборда: перетаскивание за ⋮⋮, изменение размера за угол (BI-18), переименование (BI-23).
-export default function DashboardWidget({ widget, shown, filtered, gridRef, dragging, dropTarget, onPatch, onCommit, onRemove, onMove, dnd }) {
+export default function DashboardWidget({ widget, shown, filtered, unfiltered, gridRef, dragging, dropTarget, onPatch, onCommit, onRemove, onMove, dnd }) {
   const [editing, setEditing] = useState(false)
   const w = widget.grid?.w || 6
   const h = widget.grid?.h || 2
@@ -65,6 +65,11 @@ export default function DashboardWidget({ widget, shown, filtered, gridRef, drag
           </h3>
         )}
         {filtered && <span className="tag">по периоду</span>}
+        {unfiltered && (
+          <span className="tag tag-muted" title="Фильтр периода сужает только графики и таблицы по датам; этот показатель посчитан за весь период">
+            за весь период
+          </span>
+        )}
         <button className="dialog-act" aria-label="Переместить раньше" title="Раньше" onClick={() => onMove(-1)}>
           ‹
         </button>

@@ -347,7 +347,15 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 .drag-handle { cursor: grab; color: var(--muted); padding: 0 4px; user-select: none; letter-spacing: -2px; }
 .drag-handle:active { cursor: grabbing; }
-.tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+.tag { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.tag-muted { background: var(--bg); color: var(--muted); border: 1px solid var(--border); }
+.period-hint { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+.view-switch button:disabled { opacity: 0.4; cursor: not-allowed; }
+.source-pick { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.source-pick select {
+  min-width: 0; max-width: 320px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font: inherit; font-size: 13px;
+}
 .widget-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .widget .chart { height: auto; }
 .widget .view-switch button { padding: 3px 8px; font-size: 12px; }
