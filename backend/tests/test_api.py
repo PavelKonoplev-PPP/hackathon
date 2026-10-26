@@ -1455,6 +1455,168 @@ class ApiTests(unittest.TestCase):
                     self.assertEqual(agent._SESSION_DATASOURCES.get(sess_id), "ext_erp")
 
 
+
+    # -----------------------------------------------------------------
+    # BI-35 (Issue #60): Saved Analytical Queries
+    # -----------------------------------------------------------------
+    def test_saved_queries_crud_and_execute(self) -> None:
+        """Issue #60 (BI-35): Saved queries CRUD, filtering, aliases, and direct execution."""
+        from backend.app.services import saved_queries
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "saved_queries.json"
+            with patch.object(saved_queries, "get_saved_queries_path", return_value=temp_file):
+                # 1. Create a query
+                create_payload = {
+                    "title": "Выручка по каналам",
+                    "description": "Агрегированная выручка за всё время",
+                    "question": "Какой канал продаж приносит больше всего выручки?",
+                    "sql": "SELECT channel, SUM(amount) AS revenue FROM t GROUP BY channel ORDER BY revenue DESC",
+                    "datasource_id": "raw",
+                    "table_name": "data_03_orders",
+                    "tags": ["revenue", "sales", "kpi"],
+                    "chart_config": {"type": "bar"},
+                }
+                res = self.client.post("/api/queries", json=create_payload)
+                self.assertEqual(res.status_code, 201)
+                created = res.json()
+                query_id = created["id"]
+                self.assertEqual(created["title"], "Выручка по каналам")
+                self.assertEqual(created["tags"], ["revenue", "sales", "kpi"])
+
+                # 2. List queries & filtering
+                list_res = self.client.get("/api/queries")
+                self.assertEqual(list_res.status_code, 200)
+                self.assertEqual(len(list_res.json()), 1)
+
+                filter_tag = self.client.get("/api/queries?tag=revenue")
+                self.assertEqual(len(filter_tag.json()), 1)
+
+                filter_tag_miss = self.client.get("/api/queries?tag=nonexistent")
+                self.assertEqual(len(filter_tag_miss.json()), 0)
+
+                filter_search = self.client.get("/api/queries?search=канал")
+                self.assertEqual(len(filter_search.json()), 1)
+
+                # 3. Retrieve query by ID
+                get_res = self.client.get(f"/api/queries/{query_id}")
+                self.assertEqual(get_res.status_code, 200)
+                self.assertEqual(get_res.json()["id"], query_id)
+
+                # 4. Alias paths (/saved-queries)
+                alias_res = self.client.get(f"/api/saved-queries/{query_id}")
+                self.assertEqual(alias_res.status_code, 200)
+
+                # 5. Update query
+                update_payload = {"title": "Общая выручка по каналам (обновлено)", "tags": ["sales", "updated"]}
+                put_res = self.client.put(f"/api/queries/{query_id}", json=update_payload)
+                self.assertEqual(put_res.status_code, 200)
+                self.assertEqual(put_res.json()["title"], "Общая выручка по каналам (обновлено)")
+                self.assertEqual(put_res.json()["tags"], ["sales", "updated"])
+
+                # 6. Execute saved query
+                with patch("backend.app.db.session.get_reader_connection") as mock_conn:
+                    mock_c = MagicMock()
+                    mock_cur = MagicMock()
+                    mock_cur.description = [("channel",), ("revenue",)]
+                    mock_cur.fetchall.return_value = [("Online", 500000), ("Retail", 300000)]
+                    mock_c.cursor.return_value.__enter__.return_value = mock_cur
+                    mock_conn.return_value = mock_c
+
+                    exec_res = self.client.post(f"/api/queries/{query_id}/execute")
+                    self.assertEqual(exec_res.status_code, 200)
+                    exec_data = exec_res.json()
+                    self.assertEqual(exec_data["status"], "completed")
+                    self.assertEqual(exec_data["query_id"], query_id)
+                    self.assertIn("успешно выполнен", exec_data["result"]["answer"])
+                    self.assertIsNotNone(exec_data["result"]["table"])
+
+                # 7. Delete query
+                del_res = self.client.delete(f"/api/queries/{query_id}")
+                self.assertEqual(del_res.status_code, 204)
+
+                # 8. Check 404 after deletion
+                get_after = self.client.get(f"/api/queries/{query_id}")
+                self.assertEqual(get_after.status_code, 404)
+
+    # -----------------------------------------------------------------
+    # BI-07 (Issue #35): Query Execution Statuses & Async Jobs
+    # -----------------------------------------------------------------
+    def test_query_execution_statuses_in_chat(self) -> None:
+        """Issue #35 (BI-07): Execution steps, status, and duration returned in chat responses."""
+        # Mutation refusal status
+        res_mut = self.client.post("/api/chat", json={"session_id": "test-st", "message": "Удали таблицу заказов"})
+        self.assertEqual(res_mut.status_code, 200)
+        data_mut = res_mut.json()
+        self.assertEqual(data_mut["status"], "refused")
+        self.assertIsInstance(data_mut["steps"], list)
+        self.assertGreater(len(data_mut["steps"]), 0)
+
+        # Ambiguous query status
+        res_amb = self.client.post("/api/chat", json={"session_id": "test-st-2", "message": "Покажи данные"})
+        self.assertEqual(res_amb.status_code, 200)
+        data_amb = res_amb.json()
+        self.assertEqual(data_amb["status"], "clarification")
+        self.assertIsInstance(data_amb["steps"], list)
+
+        # Describe query completed status
+        with patch.object(agent, "describe_data") as mock_desc:
+            mock_desc.return_value = {
+                "answer": "В базе данных 9 таблиц.",
+                "table": None,
+                "chart": None,
+                "sql": None,
+                "clarification": None,
+            }
+            res_desc = self.client.post("/api/chat", json={"session_id": "test-st-3", "message": "Опиши структуру данных"})
+            self.assertEqual(res_desc.status_code, 200)
+            data_desc = res_desc.json()
+            self.assertEqual(data_desc["status"], "completed")
+            self.assertIsInstance(data_desc["steps"], list)
+            self.assertGreater(len(data_desc["steps"]), 0)
+            self.assertIsNotNone(data_desc.get("execution_time_ms"))
+
+    def test_query_job_async_tracking(self) -> None:
+        """Issue #35 (BI-07): Async query job creation, status polling, and job listing."""
+        job_res = self.client.post(
+            "/api/chat/jobs",
+            json={"session_id": "test-async-job", "message": "Удали все данные из таблицы"},
+        )
+        self.assertEqual(job_res.status_code, 202)
+        job_data = job_res.json()
+        job_id = job_data["job_id"]
+        self.assertEqual(job_data["status"], "pending")
+
+        # Poll status
+        status_res = self.client.get(f"/api/chat/jobs/{job_id}")
+        self.assertEqual(status_res.status_code, 200)
+        poll_data = status_res.json()
+        self.assertIn(poll_data["status"], ["pending", "running", "completed", "failed"])
+        self.assertIsInstance(poll_data["steps"], list)
+
+        # List jobs
+        list_res = self.client.get("/api/chat/jobs")
+        self.assertEqual(list_res.status_code, 200)
+        self.assertIsInstance(list_res.json(), list)
+        self.assertTrue(any(j["job_id"] == job_id for j in list_res.json()))
+
+    def test_query_sse_streaming(self) -> None:
+        """Issue #35 (BI-07): Server-Sent Events stream yields progress steps and result."""
+        with patch.object(agent, "describe_data") as mock_desc:
+            mock_desc.return_value = {
+                "answer": "Таблицы описаны.",
+                "table": None,
+                "chart": None,
+                "sql": None,
+                "clarification": None,
+            }
+            res = self.client.get("/api/chat/stream?message=Опиши+структуру")
+            self.assertEqual(res.status_code, 200)
+            self.assertIn("text/event-stream", res.headers.get("content-type", ""))
+            body = res.text
+            self.assertIn("data:", body)
+            self.assertIn("parse_intent", body)
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -69,14 +69,28 @@ class ChatRequest(BaseModel):
     table_name: str | None = None
 
 
+class ExecutionStep(BaseModel):
+    """Execution step detail for analytical query progress tracking (BI-07 / Issue #35)."""
+
+    step: str
+    title: str
+    status: Literal["pending", "in_progress", "completed", "failed", "skipped"] = "completed"
+    duration_ms: float | None = None
+    details: str | None = None
+    timestamp: str | None = None
+
+
 class ChatResponse(BaseModel):
-    """Full chat response schema matching docs/api-contract.md."""
+    """Full chat response schema matching docs/api-contract.md with BI-07 status tracking."""
 
     answer: str
     chart: ChartSpec | None = None
     table: TableSpec | None = None
     sql: str | None = None
     clarification: ClarificationSpec | None = None
+    status: str = "completed"
+    steps: list[ExecutionStep] = Field(default_factory=list)
+    execution_time_ms: float | None = None
 
 
 # Schema / Catalog endpoint schemas (/api/schema conforming to Issue #39)
@@ -314,3 +328,85 @@ class CsvUploadResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     catalog_refreshed: bool = True
     message: str | None = None
+
+
+# Query Execution Statuses & Jobs (BI-07 / Issue #35)
+class JobStatusResponse(BaseModel):
+    """Status and progress details of an analytical query execution job."""
+
+    job_id: str
+    session_id: str | None = None
+    message: str
+    datasource_id: str | None = "raw"
+    table_name: str | None = None
+    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    current_step: str | None = None
+    progress_pct: int = 0
+    steps: list[ExecutionStep] = Field(default_factory=list)
+    result: ChatResponse | None = None
+    error: str | None = None
+    created_at: str
+    updated_at: str
+    execution_time_ms: float | None = None
+
+
+class JobCreateResponse(BaseModel):
+    """Initial response on query execution job submission."""
+
+    job_id: str
+    status: str = "pending"
+    message: str = "Query execution initiated"
+
+
+# Saved Analytical Queries (BI-35 / Issue #60)
+class SavedQuery(BaseModel):
+    """Saved analytical query model."""
+
+    id: str
+    title: str
+    description: str | None = None
+    question: str | None = None
+    sql: str | None = None
+    datasource_id: str = "raw"
+    table_name: str | None = None
+    chart_config: dict[str, Any] | None = None
+    tags: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class SavedQueryCreateRequest(BaseModel):
+    """Payload to create a saved analytical query."""
+
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = None
+    question: str | None = None
+    sql: str | None = None
+    datasource_id: str = "raw"
+    table_name: str | None = None
+    chart_config: dict[str, Any] | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class SavedQueryUpdateRequest(BaseModel):
+    """Payload to update an existing saved analytical query."""
+
+    title: str | None = None
+    description: str | None = None
+    question: str | None = None
+    sql: str | None = None
+    datasource_id: str | None = None
+    table_name: str | None = None
+    chart_config: dict[str, Any] | None = None
+    tags: list[str] | None = None
+
+
+class SavedQueryExecuteResponse(BaseModel):
+    """Result of executing a saved analytical query."""
+
+    query_id: str
+    title: str
+    datasource_id: str
+    status: str = "completed"
+    execution_time_ms: float = 0.0
+    result: ChatResponse
