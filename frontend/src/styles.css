@@ -400,3 +400,58 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .inline-form input { min-width: 0; flex: 1; }
   .theme-select { max-width: 120px; }
 }
+
+/* ---------- прогресс и этапы запроса (BI-07) ---------- */
+.progress-bubble { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 260px; }
+.progress-step { font-size: 14px; color: var(--muted); }
+.progress-bar { flex-basis: 100%; height: 4px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.progress-bar span { display: block; height: 100%; background: var(--accent); transition: width 0.4s ease; }
+.steps { list-style: none; margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 13px; }
+.step { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; }
+.step-mark { width: 14px; color: #16a34a; }
+.step-failed .step-mark { color: var(--error); }
+.step-skipped .step-mark, .step-pending .step-mark { color: var(--muted); }
+.step-title { flex: 1; }
+.step-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.chip-static { display: inline-flex; align-items: center; gap: 4px; cursor: default; font-size: 13px; padding: 3px 4px 3px 10px; }
+.query-run { font-size: 10px; color: var(--accent); }
+
+/* ---------- страница «Данные» ---------- */
+.card {
+  padding: 16px; margin-bottom: 16px; border-radius: 12px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.card-title { margin: 0 0 10px; font-size: 16px; }
+.card .page-head { margin-bottom: 8px; }
+.card .page-head .card-title { margin: 0; }
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center;
+  padding: 24px 16px; border: 2px dashed var(--border); border-radius: 12px; cursor: pointer;
+}
+.dropzone:hover, .dropzone-on { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone { position: relative; }
+.dropzone input { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
+.dropzone:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.csv-options { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; }
+.csv-options label { display: flex; flex-direction: column; gap: 4px; }
+.csv-options select {
+  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); font: inherit; font-size: 14px;
+}
+.csv-preview { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+.csv-preview p { margin: 0; }
+.csv-preview .page-actions { margin-top: 4px; }
+code { font-size: 13px; padding: 1px 5px; border-radius: 4px; background: var(--bg); }
+.warnings { margin: 0; padding: 8px 12px 8px 28px; border-radius: 8px; background: var(--badge-bg); color: var(--badge-text); font-size: 13px; }
+.conflict { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--error); }
+.conflict p { margin: 0 0 8px; }
+.success { margin-top: 16px; padding: 12px; border-radius: 8px; border: 1px solid #16a34a; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.success p { margin: 0; }
+.table-list { list-style: none; margin: 0; padding: 0; }
+.table-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 4px; border-bottom: 1px solid var(--border);
+}
+.table-list li:last-child { border-bottom: none; }
+.table-new { background: var(--accent-soft); border-radius: 6px; }

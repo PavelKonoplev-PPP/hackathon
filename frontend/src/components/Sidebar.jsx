@@ -62,14 +62,77 @@ function DialogItem({ conv, active, busy, onSelect, onDelete, onRename }) {
   )
 }
 
+function QueryItem({ query, onRun, onRename, onDelete }) {
+  const [editing, setEditing] = useState(false)
+
+  if (editing) {
+    return (
+      <li>
+        <div className="dialog dialog-active">
+          <InlineEdit
+            value={query.title}
+            label="Название запроса"
+            onSave={(t) => {
+              onRename(query.id, t)
+              setEditing(false)
+            }}
+            onCancel={() => setEditing(false)}
+          />
+        </div>
+      </li>
+    )
+  }
+
+  return (
+    <li>
+      <div
+        className="dialog"
+        role="button"
+        tabIndex={0}
+        title={`Выполнить заново: ${query.question || query.title}`}
+        onClick={() => onRun(query)}
+        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onRun(query)}
+      >
+        <span className="query-run" aria-hidden="true">
+          ▶
+        </span>
+        <span className="dialog-title">{query.title}</span>
+        <button
+          className="dialog-act"
+          aria-label={`Переименовать запрос ${query.title}`}
+          title="Переименовать"
+          onClick={(e) => {
+            e.stopPropagation()
+            setEditing(true)
+          }}
+        >
+          ✎
+        </button>
+        <button
+          className="dialog-act dialog-delete"
+          aria-label={`Удалить запрос ${query.title}`}
+          title="Удалить"
+          onClick={(e) => {
+            e.stopPropagation()
+            if (window.confirm(`Удалить сохранённый запрос «${query.title}»?`)) onDelete(query.id)
+          }}
+        >
+          ×
+        </button>
+      </div>
+    </li>
+  )
+}
+
 const matches = (text, q) => (text || '').toLowerCase().includes(q)
 
 // Боковая панель: поиск (BI-24), диалоги с переименованием (BI-21, BI-23) и дашборды.
-export default function Sidebar({ conversations, activeId, loadingIds, dashboards, dashboardsError, onRetryDashboards, route, open, onCreate, onSelect, onDelete, onRename, onClose }) {
+export default function Sidebar({ conversations, activeId, loadingIds, dashboards, dashboardsError, onRetryDashboards, queries = [], onRunQuery, onRenameQuery, onDeleteQuery, route, open, onCreate, onSelect, onDelete, onRename, onClose }) {
   const [query, setQuery] = useState('')
   const q = query.trim().toLowerCase()
   const dialogs = q ? conversations.filter((c) => matches(c.title, q) || c.messages.some((m) => matches(m.text, q))) : conversations
   const dashes = q ? dashboards.filter((d) => matches(d.title, q) || matches(d.description, q)) : dashboards
+  const savedQs = q ? queries.filter((x) => matches(x.title, q) || matches(x.question, q) || matches(x.description, q)) : queries
   const inChat = route.page === 'chat'
 
   return (
@@ -79,8 +142,8 @@ export default function Sidebar({ conversations, activeId, loadingIds, dashboard
         <input
           type="search"
           className="search"
-          placeholder="Поиск по диалогам и дашбордам"
-          aria-label="Поиск по диалогам и дашбордам"
+          placeholder="Поиск по диалогам, дашбордам и запросам"
+          aria-label="Поиск по диалогам, дашбордам и запросам"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -135,6 +198,15 @@ export default function Sidebar({ conversations, activeId, loadingIds, dashboard
           </p>
         )}
         {!dashboardsError && dashboards.length === 0 && <p className="muted small">Пока нет. Добавьте график из чата кнопкой «+ На дашборд».</p>}
+
+        <p className="side-section">Запросы</p>
+        <ul className="dialogs">
+          {savedQs.map((x) => (
+            <QueryItem key={x.id} query={x} onRun={onRunQuery} onRename={onRenameQuery} onDelete={onDeleteQuery} />
+          ))}
+        </ul>
+        {q && savedQs.length === 0 && queries.length > 0 && <p className="muted small">Запросов не найдено</p>}
+        {queries.length === 0 && <p className="muted small">Сохраняйте ответы кнопкой «Сохранить запрос», чтобы перезапускать их на свежих данных.</p>}
       </aside>
     </>
   )

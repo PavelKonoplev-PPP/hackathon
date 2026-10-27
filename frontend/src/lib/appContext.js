@@ -4,6 +4,8 @@ import { createContext } from 'react'
 export const AppContext = createContext({
   dashboards: [],
   datasources: [],
+  queries: [],
+  refreshQueries: () => {},
   dashboardsError: null,
   refreshDashboards: () => {},
   notify: () => {},

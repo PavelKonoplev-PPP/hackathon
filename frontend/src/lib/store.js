@@ -3,15 +3,18 @@ import { sendMessage } from './api.js'
 import { detectViewRequest, pieProblem, viewPhrase } from './chartViews.js'
 import { createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
 import { dashboardHref } from './router.js'
+import { queriesApi } from './queriesApi.js'
 
 const KEY = 'bi-chat-conversations-v1'
 const TITLE_MAX = 40
 
 const uuid = () => crypto.randomUUID()
 
-function newConversation(datasourceId = null) {
+const NEW_TITLE = 'Новый диалог'
+
+function newConversation(datasourceId = null, tableName = null) {
   const now = Date.now()
-  return { id: uuid(), sessionId: uuid(), datasourceId, title: 'Новый диалог', messages: [], createdAt: now, updatedAt: now }
+  return { id: uuid(), sessionId: uuid(), datasourceId, tableName, title: NEW_TITLE, messages: [], createdAt: now, updatedAt: now }
 }
 
 function makeTitle(text) {
@@ -44,6 +47,7 @@ export function useConversations({ onDashboardCreated } = {}) {
   const onCreatedRef = useRef(onDashboardCreated)
   onCreatedRef.current = onDashboardCreated
   const [loadingIds, setLoadingIds] = useState([])
+  const [progress, setProgress] = useState({}) // этап выполнения по диалогам (BI-07)
   const stateRef = useRef(state)
   const loadingRef = useRef(new Set())
   stateRef.current = state
@@ -170,38 +174,91 @@ export function useConversations({ onDashboardCreated } = {}) {
       return
     }
 
-    update(id, (c) => ({
-      ...c,
-      title: c.messages.length === 0 ? makeTitle(message) : c.title,
-      messages: [...c.messages, userMsg],
-      updatedAt: Date.now(),
-    }))
+    await askAgent(conv, message, userMsg)
+  }
+
+  const startLoading = (id) => {
     loadingRef.current.add(id)
     setLoadingIds((l) => [...l, id])
+  }
 
-    let botMsg
-    try {
-      const reply = await sendMessage(conv.sessionId, message, conv.datasourceId)
-      botMsg = {
-        id: uuid(),
-        role: 'assistant',
-        text: reply.answer,
-        chart: reply.chart,
-        table: reply.table,
-        sql: reply.sql,
-        clarification: reply.clarification,
-      }
-    } catch {
-      botMsg = {
-        id: uuid(),
-        role: 'assistant',
-        error: true,
-        text: 'Не удалось получить ответ. Проверьте, что сервер запущен, и попробуйте ещё раз.',
-      }
-    }
-    update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
+  const stopLoading = (id) => {
     loadingRef.current.delete(id)
     setLoadingIds((l) => l.filter((x) => x !== id))
+    setProgress((p) => {
+      const next = { ...p }
+      delete next[id]
+      return next
+    })
+  }
+
+  const botFromResult = (reply, extra = {}) => ({
+    id: uuid(),
+    role: 'assistant',
+    text: reply.answer,
+    chart: reply.chart,
+    table: reply.table,
+    sql: reply.sql,
+    clarification: reply.clarification,
+    status: reply.status,
+    steps: reply.steps,
+    executionMs: reply.execution_time_ms,
+    ...extra,
+  })
+
+  const withTitle = (c, text) => (c.messages.length === 0 && c.title === NEW_TITLE ? makeTitle(text) : c.title)
+
+  // Вопрос агенту: этапы выполнения приходят в progress, ответ — в тот же диалог.
+  async function askAgent(conv, message, userMsg) {
+    const id = conv.id
+    update(id, (c) => ({ ...c, title: withTitle(c, message), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
+    startLoading(id)
+    let botMsg
+    try {
+      const reply = await sendMessage(conv.sessionId, message, {
+        datasourceId: conv.datasourceId,
+        tableName: conv.tableName,
+        onProgress: (p) => setProgress((s) => ({ ...s, [id]: p })),
+      })
+      botMsg = botFromResult(reply)
+    } catch (e) {
+      botMsg = { id: uuid(), role: 'assistant', error: true, text: `Не удалось получить ответ: ${e.message}` }
+    }
+    update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
+    stopLoading(id)
+  }
+
+  // Новый диалог по выбранной таблице (например, после загрузки CSV) с первым вопросом.
+  async function startConversation({ datasourceId = null, tableName = null, title } = {}, text) {
+    const c = newConversation(datasourceId, tableName)
+    if (title) c.title = title
+    setState((s) => ({ conversations: [c, ...s.conversations], activeId: c.id }))
+    if (text) await askAgent(c, text, { id: uuid(), role: 'user', text })
+    return c.id
+  }
+
+  const clearTable = (id) => update(id, (c) => ({ ...c, tableName: null }))
+
+  // Повторный запуск сохранённого запроса (BI-35): результат приходит в текущий диалог.
+  async function runSavedQuery(id, query) {
+    const conv = stateRef.current.conversations.find((c) => c.id === id)
+    if (!conv || loadingRef.current.has(id)) return
+    const userMsg = { id: uuid(), role: 'user', text: `Повторить сохранённый запрос «${query.title}»` }
+    update(id, (c) => ({ ...c, title: withTitle(c, query.title), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
+    startLoading(id)
+    setProgress((s) => ({ ...s, [id]: { step: 'Выполнение сохранённого запроса' } }))
+    let botMsg
+    try {
+      const r = await queriesApi.execute(query.id)
+      botMsg = botFromResult(r.result, {
+        view: query.chart_config?.type || null,
+        executionMs: r.execution_time_ms ?? r.result?.execution_time_ms,
+      })
+    } catch (e) {
+      botMsg = { id: uuid(), role: 'assistant', error: true, text: `Не удалось выполнить сохранённый запрос: ${e.message}` }
+    }
+    update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
+    stopLoading(id)
   }
 
   const active = state.conversations.find((c) => c.id === state.activeId)
@@ -209,6 +266,7 @@ export function useConversations({ onDashboardCreated } = {}) {
     conversations: state.conversations,
     active,
     loadingIds,
+    progress,
     create,
     select,
     remove,
@@ -217,5 +275,8 @@ export function useConversations({ onDashboardCreated } = {}) {
     rename,
     buildDashboard,
     setDatasource,
+    startConversation,
+    clearTable,
+    runSavedQuery,
   }
 }
