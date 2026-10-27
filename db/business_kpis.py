@@ -47,6 +47,48 @@ DEFINITIONS = (
         "Отношение суммы кликов к сумме показов ×100; это не среднее построчных CTR."),
 )
 
+# Match the SQL types exposed by backend/llm/sql_runner.py, not just heuristic
+# inferred_type labels: unsupported TEXT remains TEXT in the generated CTE.
+OPERAND_KINDS = {
+    "Тип операции": "text",
+    "Количество, шт.": "numeric",
+    "Цена до скидки за единицу, руб.": "numeric",
+    "Скидка, %": "numeric",
+    "Создано (МСК)": "timestamp",
+    "Закрыто (МСК)": "timestamp",
+    "Расходы, руб.": "numeric",
+    "Клики": "numeric",
+    "Показы": "numeric",
+}
+NUMERIC_STORAGE_TYPES = {
+    "smallint", "integer", "bigint", "numeric", "decimal",
+    "real", "double precision", "smallserial", "serial", "bigserial",
+}
+TEXT_STORAGE_TYPES = {"text", "character varying", "character", "varchar", "char"}
+TIMESTAMP_STORAGE_TYPES = {
+    "timestamp", "timestamp without time zone", "timestamp with time zone",
+}
+
+
+def _sql_operand_kind(column: dict) -> str:
+    """Type the KPI expression actually sees inside the SQL runner's CTE."""
+    conversion = column.get("conversion") or {}
+    if isinstance(conversion, dict):
+        target = conversion.get("target_type")
+        if (target in {"integer", "decimal", "date", "timestamp"}
+                and conversion.get("policy") in {"safe_complete", "safe_with_nulls"}):
+            return "numeric" if target in {"integer", "decimal"} else target
+    storage = str(column.get("postgres_type") or "").strip().lower()
+    if storage in NUMERIC_STORAGE_TYPES:
+        return "numeric"
+    if storage in TIMESTAMP_STORAGE_TYPES:
+        return "timestamp"
+    if storage in TEXT_STORAGE_TYPES:
+        return "text"
+    if storage == "date":
+        return "date"
+    return "unknown"
+
 
 def propose_kpis(catalog: dict) -> dict:
     if not isinstance(catalog, dict) or not isinstance(catalog.get("tables"), list):
@@ -62,16 +104,19 @@ def propose_kpis(catalog: dict) -> dict:
             continue
         cols = {c.get("name"): c for c in table.get("columns", []) if isinstance(c, dict)}
         missing = sorted(set(definition.required) - cols.keys())
-        unsafe = [name for name in definition.required if name in cols and
-                  cols[name].get("conversion", {}).get("policy") not in
-                  ("safe_complete", "safe_with_nulls") and
-                  cols[name].get("postgres_type") == "text" and
-                  cols[name].get("inferred_type") in ("integer", "decimal", "date", "timestamp")]
+        incompatible = []
+        for name in definition.required:
+            if name not in cols:
+                continue
+            expected = OPERAND_KINDS.get(name, "unknown")
+            actual = _sql_operand_kind(cols[name])
+            if actual != expected or expected == "unknown":
+                incompatible.append(f"{name} (нужно {expected}, доступно {actual})")
         reasons = []
         if missing:
             reasons.append("Нет колонок: " + ", ".join(missing))
-        if unsafe:
-            reasons.append("Числовые/временные типы не подтверждены: " + ", ".join(unsafe))
+        if incompatible:
+            reasons.append("Несовместимые типы колонок: " + ", ".join(incompatible))
         results.append({
             "id": definition.id, "schema": schema, "table": definition.table,
             "title": definition.title, "unit": definition.unit,
