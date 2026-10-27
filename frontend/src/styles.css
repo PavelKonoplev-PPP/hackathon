@@ -455,3 +455,12 @@ code { font-size: 13px; padding: 1px 5px; border-radius: 4px; background: var(--
 }
 .table-list li:last-child { border-bottom: none; }
 .table-new { background: var(--accent-soft); border-radius: 6px; }
+.ok-text { color: #16a34a; }
+.ds-form { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.ds-form p { margin: 0; }
+.ds-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.ds-grid label { display: flex; flex-direction: column; gap: 4px; }
+.ds-grid input {
+  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); font: inherit; font-size: 14px;
+}

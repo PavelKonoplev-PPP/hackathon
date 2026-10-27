@@ -1,8 +1,12 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import DataTable from './DataTable.jsx'
+import DatasourcesSection from './DatasourcesSection.jsx'
 import { AppContext } from '../lib/appContext.js'
 import { MAX_CSV_BYTES, getSchema, isMock, previewCsv, uploadCsv } from '../lib/api.js'
-import { formatValue } from '../lib/format.js'
+import { countText, formatValue } from '../lib/format.js'
+
+const ROWS = ['строка', 'строки', 'строк']
+const COLS = ['колонка', 'колонки', 'колонок']
 
 const DELIMITERS = [
   ['', 'Определить автоматически'],
@@ -24,7 +28,7 @@ function sizeText(bytes) {
 }
 
 // Данные (BI-08/11/36): загрузка CSV с предпросмотром и список таблиц в базе.
-export default function DataPage({ onAskTable }) {
+export default function DataPage({ onAskTable, onAskSource }) {
   const { notify, refreshDatasources } = useContext(AppContext)
   const [tables, setTables] = useState(null)
   const [tablesError, setTablesError] = useState(null)
@@ -94,11 +98,11 @@ export default function DataPage({ onAskTable }) {
       setResult(r)
       setPreview(null)
       setFile(null)
-      notify(`Таблица «${r.table_name}» загружена: ${formatValue(r.row_count)} строк`)
+      notify(`Таблица «${r.table_name}» загружена: ${countText(r.row_count, ROWS)}`)
       loadTables()
       refreshDatasources()
     } catch (e) {
-      if (e.status === 409) setConflict(e.message)
+      if (e.status === 409) setConflict(`Таблица «${preview.table_name}» уже есть в базе. Перезаписать её данными из этого файла?`)
       else setError(e.message)
     } finally {
       setBusy(null)
@@ -227,7 +231,7 @@ export default function DataPage({ onAskTable }) {
         {result && (
           <div className="success" role="status">
             <p>
-              Готово: таблица <code>{result.schema_name}.{result.table_name}</code> — {formatValue(result.row_count)} строк, {result.columns.length} колонок.
+              Готово: таблица <code>{result.schema_name}.{result.table_name}</code> — {countText(result.row_count, ROWS)}, {countText(result.columns.length, COLS)}.
               {result.catalog_refreshed ? ' Каталог обновлён, агент уже видит эти данные.' : ''}
             </p>
             {result.warnings?.length > 0 && (
@@ -243,6 +247,8 @@ export default function DataPage({ onAskTable }) {
           </div>
         )}
       </section>
+
+      <DatasourcesSection onAskSource={onAskSource} />
 
       <section className="card">
         <div className="page-head">
@@ -261,7 +267,7 @@ export default function DataPage({ onAskTable }) {
                   <strong>{t.display_name || t.name}</strong>
                   <span className="muted small">
                     {' '}
-                    · {t.row_count != null ? `${formatValue(t.row_count)} строк` : 'строк: —'} · колонок: {t.columns?.length ?? '—'}
+                    · {t.row_count != null ? countText(t.row_count, ROWS) : 'строк: —'} · {t.columns ? countText(t.columns.length, COLS) : 'колонок: —'}
                     {t.warnings?.length ? ` · предупреждений: ${t.warnings.length}` : ''}
                   </span>
                 </div>

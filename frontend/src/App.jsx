@@ -124,6 +124,11 @@ export default function App() {
     startConversation({ datasourceId: 'raw', tableName, title: `Таблица: ${displayName || tableName}` }, 'Опиши данные')
   }
 
+  function onAskSource(ds) {
+    go('#/chat')
+    startConversation({ datasourceId: ds.id, title: `Источник: ${ds.name}` }, 'Опиши данные')
+  }
+
   function onRunQuery(query) {
     go('#/chat')
     setMenuOpen(false)
@@ -219,7 +224,7 @@ export default function App() {
                 onClearTable={clearTable}
               />
             )}
-            {route.page === 'data' && <DataPage onAskTable={onAskTable} />}
+            {route.page === 'data' && <DataPage onAskTable={onAskTable} onAskSource={onAskSource} />}
             {route.page === 'dashboards' && <DashboardsPage />}
             {route.page === 'dashboard' && <DashboardPage key={route.id} id={route.id} />}
           </main>
