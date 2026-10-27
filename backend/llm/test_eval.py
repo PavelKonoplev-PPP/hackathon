@@ -85,6 +85,8 @@ class TableChoiceTests(unittest.TestCase):
         values = json.loads(VALUES.read_text(encoding="utf-8"))
         for case in CASES:
             question = (case.get("steps") or [case["question"]])[0]
+            if case["mode"] == "refuse":
+                question = case["question"]  # в диалоге отказ проверяется на последнем вопросе
             with self.subTest(case=case["id"]):
                 if WRITE_INTENT.search(question):
                     self.assertEqual(case["mode"], "refuse")

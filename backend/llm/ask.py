@@ -693,7 +693,9 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         if not followup and is_short_refinement(question, tables):
             values_by_table = _values_for_all(runner, tables)
             guess, _ = choose_table(question, tables, values_by_table)
-            followup = guess is None or guess["name"] == last["table"]
+            # только если вопрос указывает на ту же таблицу: «Какая погода в Москве?» после
+            # вопроса о выручке — не уточнение, а вопрос не по данным
+            followup = guess is not None and guess["name"] == last["table"]
         if followup:
             previous = last
             forced_table = by_name[last["table"]]
