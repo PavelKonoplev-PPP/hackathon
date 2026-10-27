@@ -1,0 +1,138 @@
+"""Утверждённые бизнес-KPI в агенте (BI-32 / #57).
+
+Каталог KPI: формулы предлагает db/business_kpis.py, бэкенд хранит подтверждения
+(POST /api/kpis/{id}/approve → data/kpi-definitions.json, см. backend/app/services/kpis.py).
+По правилу из db/BUSINESS_KPIS.md агент подставляет ТОЛЬКО утверждённые (approved)
+и доступные KPI; «proposed» и «unavailable» не используются.
+
+Если вопрос про такой KPI («Какой CTR по площадкам?»):
+- модель получает утверждённую формулу как показатель;
+- смысловая проверка требует именно эту формулу (а не «похожую»);
+- в ответе указано, что расчёт по утверждённому определению.
+
+Файл перечитывается при изменении — перезапуск бэкенда не нужен.
+Путь можно задать переменной KPI_DEFINITIONS_PATH.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_PATH = Path(__file__).resolve().parents[2] / "data" / "kpi-definitions.json"
+
+# Как KPI называют в вопросах. Порядок важен: сначала более узкие (CTR раньше кликов).
+TRIGGERS: list[tuple[str, re.Pattern]] = [
+    ("ads_ctr", re.compile(r"\bctr\b|\bцтр\b|кликабельн", re.IGNORECASE)),
+    ("support_avg_resolution_h", re.compile(
+        r"(врем\w*|скорост\w*|час\w*|долго)[^?]*(закрыт|закрыва|решени|решаю|решен)", re.IGNORECASE)),
+    ("sales_revenue", re.compile(r"выручк|оборот", re.IGNORECASE)),
+    ("ads_spend", re.compile(r"(расход\w*|затрат\w*|потрат\w*|бюджет\w*)[^?]*реклам|"
+                             r"реклам\w*[^?]*(расход|затрат|потрат|бюджет)", re.IGNORECASE)),
+    ("ads_clicks", re.compile(r"\bклик(ов|и|а)?\b", re.IGNORECASE)),
+    ("sales_operations", re.compile(r"операци\w*\s+(типа\s+)?[«\"']продажа", re.IGNORECASE)),
+]
+
+_CACHE: dict[str, tuple[float, list]] = {}
+
+
+@dataclass(frozen=True)
+class Kpi:
+    id: str
+    schema: str
+    table: str
+    title: str
+    expression: str
+    unit: str | None
+    description: str
+    approved_by: str | None
+
+    def mentioned_in(self, question: str) -> bool:
+        pattern = dict(TRIGGERS).get(self.id)
+        if pattern is not None:
+            return bool(pattern.search(question))
+        return self.title.lower() in question.lower()  # KPI, о которых агент заранее не знает
+
+
+def kpi_path() -> Path:
+    return Path(os.getenv("KPI_DEFINITIONS_PATH") or DEFAULT_PATH)
+
+
+def load(path: Path | None = None) -> list[Kpi]:
+    """Утверждённые KPI с формулой. Нет файла или он испорчен — пустой список."""
+    path = Path(path or kpi_path())
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+    key = str(path)
+    if key in _CACHE and _CACHE[key][0] == mtime:
+        return _CACHE[key][1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        items = data.get("kpis") or []
+        default_schema = data.get("schema")
+    except (OSError, ValueError, AttributeError):
+        return []
+    result = []
+    for k in items:
+        if not isinstance(k, dict) or k.get("status") != "approved":
+            continue
+        if not all(isinstance(k.get(f), str) and k.get(f) for f in ("id", "table", "expression")):
+            continue
+        result.append(Kpi(id=k["id"], schema=k.get("schema") or default_schema or "",
+                          table=k["table"], title=str(k.get("title") or k["id"]),
+                          expression=k["expression"].strip(), unit=k.get("unit"),
+                          description=str(k.get("description") or ""),
+                          approved_by=k.get("approved_by")))
+    _CACHE[key] = (mtime, result)
+    return result
+
+
+def for_question(question: str, table: dict, schema: str | None,
+                 approved: list[Kpi] | None = None) -> Kpi | None:
+    """Утверждённый KPI этой таблицы, о котором спрашивают, или None."""
+    approved = load() if approved is None else approved
+    for kpi_id, _ in TRIGGERS:  # узкие раньше широких
+        for k in approved:
+            if k.id == kpi_id and k.table == table.get("name") and k.schema == (schema or k.schema) \
+                    and k.mentioned_in(question):
+                return k
+    for k in approved:  # KPI без известных триггеров — по названию
+        if k.id not in dict(TRIGGERS) and k.table == table.get("name") and k.mentioned_in(question):
+            return k
+    return None
+
+
+def table_bonus(question: str, table: dict, schema: str | None,
+                approved: list[Kpi] | None = None) -> int:
+    """Очки при выборе таблицы: вопрос про утверждённый KPI этой таблицы."""
+    return 2 if for_question(question, table, schema, approved) else 0
+
+
+def hint(kpi: Kpi) -> str:
+    return (f"\nВ вопросе — утверждённый бизнес-KPI «{kpi.title}». Считай его строго по "
+            f"утверждённой формуле: {kpi.expression}\n"
+            "Если в вопросе есть разбивка (по площадкам, по месяцам) — добавь колонку разбивки "
+            "в SELECT и GROUP BY, формулу не меняй.\n")
+
+
+def _norm(sql: str) -> str:
+    return re.sub(r"\s+", "", sql).lower()
+
+
+def check(sql: str, kpi: Kpi) -> list[str]:
+    """Проблема, если запрос считает KPI не по утверждённой формуле."""
+    if _norm(kpi.expression) in _norm(sql):
+        return []
+    return [f"«{kpi.title}» — утверждённый KPI: используй ровно формулу {kpi.expression}"]
+
+
+def note(kpi: Kpi) -> str:
+    who = f", утвердил: {kpi.approved_by}" if kpi.approved_by else ""
+    text = f"Расчёт по утверждённому определению KPI «{kpi.title}»{who}."
+    if kpi.description:
+        text += f" {kpi.description}"
+    return text
