@@ -29,6 +29,7 @@ from collections import OrderedDict
 
 from . import advanced_analytics as adv
 from . import compare as cmp
+from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
                         adjust_sql, check_destructive_mutation, check_money, check_sql,
@@ -181,6 +182,8 @@ def keyword_scores(question: str, tables: list[dict],
     for t in tables:
         name_words = words(display_table_name(t["name"]))
         col_words = set().union(*(words(c["name"]) for c in t.get("columns") or []))
+        if money_formula([c["name"] for c in t.get("columns") or []]):
+            col_words |= {"выручка", "оборот"}  # выручку можно посчитать: количество × цена
         values = (values_by_table or {}).get(t["name"]) or {}
         # длинные описательные значения («Недостаточно прав для выполнения операции») шумят
         value_words = set().union(set(), *(words(v) for vs in values.values() for v in vs
@@ -210,7 +213,8 @@ def choose_table(question: str, tables: list[dict], values_by_table: dict) -> tu
     scores = keyword_scores(question, tables, values_by_table, structural)
     order = sorted(range(len(tables)), key=lambda i: -scores[i])
     best = scores[order[0]]
-    analytic = bool(ANALYTIC_WORDS.search(question))
+    analytic = bool(ANALYTIC_WORDS.search(question) or wi.WHATIF.search(question)
+                    or wi.FORECAST.search(question))
     # «Какая погода в Москве?» — совпало только значение «Москва», а вопрос не аналитический
     if best == 0 or (not analytic and max(structural) == 0):
         if len(tables) == 1:
@@ -570,7 +574,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                     progress=None, trace: dict | None = None,
                     session_id: str | None = None,
                     table_name: str | None = None,
-                    datasource_id: str | None = None) -> dict:
+                    datasource_id: str | None = None, _nested: bool = False) -> dict:
     """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification.
 
     runner — объект с методами run(table, sql) и category_values(table),
@@ -654,6 +658,14 @@ def answer_question(question: str, catalog: dict, runner, client=None,
             trace["clarification"] = "ambiguous"
             return ambiguous_refusal.to_dict()
 
+
+    # Сценарии «что если» (#56) и прогноз (сценарий 10): база — обычным путём, расчёт — кодом
+    if not _nested and (wi.is_whatif(question) or wi.is_forecast(question)):
+        scenario = _scenario_answer(question, catalog, runner, client, say, trace, state,
+                                    session_id=session_id, datasource_id=datasource_id,
+                                    forced=forced_table)
+        if scenario is not None:
+            return scenario
 
     # 1. Только сменить вид прошлого результата («покажи кругом») — без модели
     last = state.get("last")
@@ -848,6 +860,13 @@ def answer_question(question: str, catalog: dict, runner, client=None,
             }
             return response
 
+    if _nested:
+        # промежуточный расчёт (база сценария или прогноза): текст не показывается — модель не зовём
+        response = _result_response(result, sql, table, None, full_question)
+        response.pop("_note", None)
+        response["answer"] = template_answer(result.columns, result.rows, result.truncated)
+        return response
+
     say("Объясняю результат")
     data = result_text(result.columns, result.rows, result.truncated)
     answer = client_chat(client, [
@@ -893,6 +912,126 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     note = response.pop("_note", "")
     response["answer"] = f"{answer} {note}".strip()
     return response
+
+
+def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: dict, state: dict,
+                     session_id: str | None = None, datasource_id: str | None = None,
+                     forced: dict | None = None) -> dict | None:
+    """«Что будет, если …» и «прогноз на …». None — обычный путь (не удалось разобрать)."""
+    tables = catalog.get("tables") or []
+    last = state.get("last")
+    forecast = wi.is_forecast(question)
+    base_text, _ = wi.split_question(question)
+
+    # таблица: продолжение прошлого вопроса («а если скидка вырастет?») или выбор по вопросу
+    table = forced  # таблица, выбранная пользователем в ответ на уточнение
+    if table is None and last and not words(base_text) and not forecast:
+        table = next((t for t in tables if t["name"] == last["table"]), None)
+    if table is None:
+        table, _ = choose_table(question, tables, _values_for_all(runner, tables))
+    if table is None:
+        return None
+    columns = [c["name"] for c in table.get("columns") or []]
+    one_table = {**catalog, "tables": [table]}
+
+    if forecast:
+        base_q = wi.forecast_base_question(question)
+    elif last and not words(base_text) and last["table"] == table["name"]:
+        base_q = last["question"]
+    else:
+        base_q = wi.base_question(question, columns)
+    say(f"Сценарий: сначала считаю базу — «{base_q}»")
+    base_trace: dict = {}
+    base = answer_question(base_q, one_table, runner, client=client, progress=say, trace=base_trace,
+                           datasource_id=datasource_id, _nested=True)
+    trace.update(table=table["name"], base_question=base_q, errors=base_trace.get("errors", []),
+                 attempts=base_trace.get("attempts"))
+    if "rows" not in base_trace:
+        return base  # уточнение или отказ базового вопроса — показываем как есть
+    sql, cols, rows = base_trace["sql"], base_trace["columns"], base_trace["rows"]
+    table_name = display_table_name(table["name"])
+
+    if forecast:
+        return _forecast_response(question, sql, cols, rows, table_name, trace)
+
+    change = wi.parse_change(question)
+    _, condition = wi.split_question(question)
+    numeric = [c["name"] for c in table.get("columns") or [] if column_kind(c) in ("integer", "decimal")]
+    driver = wi.driver_column(condition, numeric)
+    new_sql = wi.scenario_sql(sql, driver, change) if driver else None
+    new_rows = None
+    if new_sql:
+        say("Пересчитываю с изменением")
+        try:
+            new_rows = runner.run(table, new_sql).rows
+        except Exception as exc:
+            trace["errors"].append(f"Сценарий: {str(exc).splitlines()[0]}")
+            new_sql = None
+    if new_sql is None and change.kind == "pp":
+        return _refuse(f"Не получилось применить изменение на {abs(change.value):g} п.п.: величина "
+                       "не входит в расчёт показателя. Уточните, какую колонку менять.")
+    combined = wi.combine(cols, rows, new_rows, change)
+    if not combined:
+        return base
+    out_cols, out_rows, metric = combined
+    trace.update(sql=new_sql or sql, columns=out_cols, rows=out_rows, scenario=change.text,
+                 driver=driver, proportional=new_sql is None)
+    answer = wi.whatif_summary(metric, out_cols, out_rows, driver, change, new_sql is None, format_value)
+    shown = f"-- t = данные таблицы «{table_name}» с приведёнными типами\n-- база:\n{sql}"
+    if new_sql:
+        shown += f"\n-- сценарий ({change.text}):\n{new_sql}"
+    if session_id:
+        state["last"] = {"question": base_q, "table": table["name"], "sql": sql}
+    return {
+        "answer": answer,
+        "table": {"columns": out_cols,
+                  "rows": [[_format_change(c, v) for c, v in zip(out_cols, r)] for r in out_rows]},
+        "sql": shown,
+        "chart": wi.whatif_chart(out_cols, out_rows, format_value),
+    }
+
+
+def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tuple],
+                       table_name: str, trace: dict) -> dict:
+    """Помесячный ряд + линейный тренд (advanced_analytics.linear_extrapolation)."""
+    series = [(r[0], float(r[-1])) for r in rows
+              if isinstance(r[0], (dt.date, dt.datetime)) and _is_number(r[-1])]
+    series.sort(key=lambda x: x[0])
+    if len(series) < 6:
+        return _refuse("Для прогноза нужен помесячный ряд хотя бы из 6 точек — "
+                       "в данных его не получилось построить.")
+    steps = wi.forecast_steps(question)
+    projected = adv.linear_extrapolation([v for _, v in series], steps)
+    months = []
+    d = series[-1][0]
+    for _ in range(steps):
+        d = wi.next_month(d)
+        months.append(d)
+    metric = cols[-1]
+    last_label, last_value = format_value(series[-1][0]), series[-1][1]
+    change = (projected[-1] - last_value) / abs(last_value) * 100 if last_value else 0.0
+    trend = "рост" if projected[-1] > last_value else "снижение"
+    change_txt = f"на {abs(change):.1f}%".replace(".", ",")
+    money = lambda v: format_value(Decimal(str(round(v, 2))))  # noqa: E731
+    answer = (f"Прогноз «{metric}» на {steps} мес. по линейному тренду за {len(series)} мес.: "
+              f"{', '.join(money(v) for v in projected)}. "
+              f"К {format_value(months[-1])} — {trend} {change_txt} к последнему факту "
+              f"({last_label}: {money(last_value)}). "
+              "Тренд не учитывает сезонность и внешние события.")
+    categories = [format_value(m) for m, _ in series] + [format_value(m) for m in months]
+    fact = [v for _, v in series] + [None] * steps
+    forecast = [None] * (len(series) - 1) + [series[-1][1]] + [round(v, 2) for v in projected]
+    trace.update(rows=[(m, v) for m, v in series], forecast=projected)
+    return {
+        "answer": answer,
+        "table": {"columns": [cols[0], f"{metric} (прогноз)"],
+                  "rows": [[format_value(m), format_value(Decimal(str(round(v, 2))))]
+                           for m, v in zip(months, projected)]},
+        "sql": f"-- t = данные таблицы «{table_name}» с приведёнными типами\n-- фактический ряд:\n{sql}",
+        "chart": {"type": "line", "title": f"{metric}: факт и прогноз", "x_label": cols[0],
+                  "y_label": metric, "categories": categories,
+                  "series": [{"name": "Факт", "data": fact}, {"name": "Прогноз", "data": forecast}]},
+    }
 
 
 def _format_change(column: str, value) -> str:
