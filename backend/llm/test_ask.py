@@ -437,6 +437,14 @@ class AnswerTests(unittest.TestCase):
         self.assertEqual(trace["table"], "data_01_Продажи")
         self.assertEqual(client.calls[0][1]["content"], "Вопрос: Выручка по каналам продаж")
 
+    def test_off_topic_after_analytic_question_is_refused(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="w1")
+        result, client, trace = ask("Какая погода в Москве?", [], runner, session="w1")
+        self.assertEqual(client.calls, [])
+        self.assertNotIn("table", result)
+        self.assertIn("не похож на вопрос к загруженным данным", result["answer"])
+
     def test_no_session_no_memory(self):
         ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT])
         result, _, _ = ask("А теперь только мобильное приложение", [GOOD_SQL, GOOD_TEXT])
