@@ -66,6 +66,31 @@ class GuardTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_caches_are_per_datasource(self):
+        """Две внешние базы с одинаковой public.sales не делят значения категорий."""
+        from backend.llm import sql_runner as sr
+
+        class Info:
+            def __init__(self, host, db):
+                self.host, self.port, self.dbname = host, 5432, db
+
+        class Conn:
+            def __init__(self, host, db):
+                self.info = Info(host, db)
+
+        class Runner(sr.PostgresRunner):
+            def _fetch(self, query, limit):
+                return ["v"], [(self.conn.info.dbname,)]
+
+        sr.clear_values_cache()
+        table = {"name": "sales", "columns": [
+            {"name": "Канал", "inferred_type": "category", "sample_distinct": 3}]}
+        shop = Runner(Conn("10.0.0.5", "shop"), schema="public").category_values(table)
+        crm = Runner(Conn("10.0.0.9", "crm"), schema="public").category_values(table)
+        self.assertEqual(shop, {"Канал": ["shop"]})
+        self.assertEqual(crm, {"Канал": ["crm"]})
+        sr.clear_values_cache()
+
     def test_build_query_casts_only_safe_columns(self):
         table = {"name": "data_01_Продажи", "columns": [
             {"name": "Цена, руб.", "conversion": {"target_type": "decimal", "policy": "safe_complete"}},
@@ -411,6 +436,14 @@ class AnswerTests(unittest.TestCase):
         _, client, trace = ask("Выручка по каналам продаж", [GOOD_SQL, GOOD_TEXT], runner, session="r2")
         self.assertEqual(trace["table"], "data_01_Продажи")
         self.assertEqual(client.calls[0][1]["content"], "Вопрос: Выручка по каналам продаж")
+
+    def test_off_topic_after_analytic_question_is_refused(self):
+        runner = FakeRunner()
+        ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT], runner, session="w1")
+        result, client, trace = ask("Какая погода в Москве?", [], runner, session="w1")
+        self.assertEqual(client.calls, [])
+        self.assertNotIn("table", result)
+        self.assertIn("не похож на вопрос к загруженным данным", result["answer"])
 
     def test_no_session_no_memory(self):
         ask("Какая выручка по каналам продаж?", [GOOD_SQL, GOOD_TEXT])

@@ -275,12 +275,13 @@ def execute_job_worker(job_id: str) -> None:
             recorder=recorder,
         )
         recorder.finish(final_status="completed")
-        chat_resp = ChatResponse(
+        # агент уже кладёт status/steps/execution_time_ms в результат — дополняем, а не дублируем
+        chat_resp = ChatResponse(**{
             **result_dict,
-            status="completed",
-            steps=recorder.steps,
-            execution_time_ms=recorder.total_duration_ms,
-        )
+            "status": result_dict.get("status") or "completed",
+            "steps": recorder.steps,
+            "execution_time_ms": recorder.total_duration_ms,
+        })
         finish_job(job_id, chat_resp)
     except Exception as exc:
         logger.exception("Error executing async query job %s: %s", job_id, exc)

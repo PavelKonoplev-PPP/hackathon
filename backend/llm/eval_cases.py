@@ -209,4 +209,18 @@ CASES = [
          question="Сравни выручку по рекламе Яндекс Директ и VK Реклама",
          gold='SELECT "Площадка", SUM("Выручка по рекламе, руб.") FROM t '
               'WHERE "Площадка" IN (\'Яндекс Директ\', \'VK Реклама\') GROUP BY 1'),
+
+    # --- What-if (#56): база и сценарий посчитаны в PostgreSQL ---
+    dict(id="whatif_discount_pp", table=SALES, mode="all",
+         question="Что будет с выручкой, если скидка вырастет на 5 п.п.?",
+         gold=f'SELECT {REVENUE}, SUM("Количество, шт." * "Цена до скидки за единицу, руб." '
+              f'* (1 - LEAST(100, GREATEST(0, "Скидка, %" + 5)) / 100.0)) FROM t'),
+    dict(id="whatif_price_by_channel", table=SALES, mode="all",
+         question="Что будет с выручкой по каналам продаж, если цены вырастут на 10%?",
+         gold=f'SELECT "Канал продажи", {REVENUE}, SUM("Количество, шт." * '
+              f'("Цена до скидки за единицу, руб." * 1.1) * (1 - "Скидка, %" / 100.0)) FROM t GROUP BY 1'),
+
+    dict(id="dialog_offtopic_after_question", table=None, mode="refuse",
+         steps=["Какая выручка с учётом скидки по каналам продаж?", "Какая погода в Москве?"],
+         question="Какая погода в Москве?"),
 ]
