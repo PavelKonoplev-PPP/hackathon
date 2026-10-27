@@ -8,7 +8,7 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-export default function Chat({ conversation, loading, onSend, onChangeView, onBuildDashboard, onChangeDatasource }) {
+export default function Chat({ conversation, loading, progress, onSend, onChangeView, onBuildDashboard, onChangeDatasource, onClearTable }) {
   const { datasources } = useContext(AppContext)
   const [input, setInput] = useState('')
   const [building, setBuilding] = useState(false)
@@ -46,7 +46,7 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
 
   return (
     <div className="chat">
-      {(resultCount > 0 || datasources.length > 1) && (
+      {(resultCount > 0 || datasources.length > 1 || conversation.tableName) && (
         <div className="chat-head">
           {datasources.length > 1 ? (
             <label className="source-pick">
@@ -66,6 +66,14 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
             </label>
           ) : (
             <span className="muted small">Результатов в диалоге: {resultCount}</span>
+          )}
+          {conversation.tableName && (
+            <span className="chip chip-static" title="Вопросы в этом диалоге — только по этой таблице">
+              Таблица: {conversation.tableName}
+              <button className="dialog-act" aria-label="Снять ограничение по таблице" onClick={() => onClearTable(conversation.id)}>
+                ×
+              </button>
+            </span>
           )}
           {resultCount > 0 && (
             <button className="ghost" onClick={build} disabled={building}>
@@ -97,6 +105,7 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
               msg={m}
               question={m.role === 'assistant' ? question : null}
               datasourceId={conversation.datasourceId}
+              tableName={conversation.tableName}
               onPickOption={send}
               onChangeView={(msgId, view) => onChangeView(conversation.id, msgId, view)}
             />
@@ -105,10 +114,18 @@ export default function Chat({ conversation, loading, onSend, onChangeView, onBu
 
         {loading && (
           <div className="msg msg-bot">
-            <div className="bubble typing" aria-label="Агент думает">
-              <span />
-              <span />
-              <span />
+            <div className="bubble progress-bubble" role="status" aria-live="polite">
+              <div className="typing" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <span className="progress-step">{progress?.step || 'Отправляю запрос…'}</span>
+              {typeof progress?.pct === 'number' && (
+                <span className="progress-bar" aria-hidden="true">
+                  <span style={{ width: `${Math.max(5, progress.pct)}%` }} />
+                </span>
+              )}
             </div>
           </div>
         )}
