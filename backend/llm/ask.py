@@ -29,6 +29,7 @@ from collections import OrderedDict
 
 from . import advanced_analytics as adv
 from . import compare as cmp
+from . import glossary as gl
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -106,7 +107,7 @@ def _column_line(col: dict, values: dict[str, list[str]]) -> str:
     line = f'- "{col["name"]}" — {label}'
     if col["name"] in values:
         line += "; значения: " + ", ".join(f"'{v}'" for v in values[col["name"]])
-    return line
+    return line + gl.note(col)  # подтверждённое определение из бизнес-словаря (#62)
 
 
 def _example(table: dict) -> tuple[str, str]:
@@ -156,7 +157,7 @@ def mentioned_columns(question: str, table: dict, limit: int = 3) -> list[str]:
     asked = {q for q in words(question) if not any(same_word(q, w) for w in table_words)}
     scored = []
     for i, col in enumerate(table.get("columns") or []):
-        hits = overlap(asked, words(col["name"]))
+        hits = overlap(asked, gl.column_words(col))  # название + синонимы из словаря
         if not hits:
             continue
         kind = col.get("inferred_type")
@@ -181,7 +182,7 @@ def keyword_scores(question: str, tables: list[dict],
     scores = []
     for t in tables:
         name_words = words(display_table_name(t["name"]))
-        col_words = set().union(*(words(c["name"]) for c in t.get("columns") or []))
+        col_words = set().union(set(), *(gl.column_words(c) for c in t.get("columns") or []))
         if money_formula([c["name"] for c in t.get("columns") or []]):
             col_words |= {"выручка", "оборот"}  # выручку можно посчитать: количество × цена
         values = (values_by_table or {}).get(t["name"]) or {}
@@ -587,6 +588,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     trace = trace if trace is not None else {}
     trace["errors"] = []
     say = progress or (lambda msg: None)
+    catalog = gl.apply(catalog)  # подтверждённые определения из бизнес-словаря (#62)
     if client is None:
         from .client import LLMClient
         client = LLMClient()
@@ -647,6 +649,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         return mutation_refusal.to_dict()
 
     # Проверка запроса отсутствующих в датасете сущностей и метрик (NPS, ROI, LTV, ТВ-реклама и т.д.)
+    # (кроме терминов, которые команда сама определила в бизнес-словаре: «CSAT» → оценка клиента)
     out_of_scope_refusal = detect_out_of_scope(question)
     if out_of_scope_refusal:
         return out_of_scope_refusal.to_dict()
@@ -819,7 +822,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                 trace.setdefault("removed_filters", []).extend(removed)
             problems = check_sql(sql, full_question, intent, values,
                                  strict=attempt < MAX_ATTEMPTS, ignore=table_words,
-                                 numeric_columns=numeric_columns, columns=column_names)
+                                 numeric_columns=numeric_columns, columns=column_names,
+                                 aliases=gl.aliases(table))
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
             if problems:
