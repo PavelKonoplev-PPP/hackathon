@@ -64,15 +64,21 @@ def quoted(question: str) -> list[str]:
     return [q.lower() for q in re.findall(r"[«\"']([^»\"']+)[»\"']", question)]
 
 
+def _contains_phrase(text: str, phrase: str) -> bool:
+    """Фраза целиком, а не кусок слова: «Продажа» не входит в «о продажах»."""
+    pattern = r"(?<![а-яёa-z0-9])" + re.escape(phrase.lower()) + r"(?![а-яёa-z0-9])"
+    return re.search(pattern, text.lower()) is not None
+
+
 def mentions(question: str, value: str, ignore: set[str] | None = None) -> bool:
     """Упомянуто ли значение категории в вопросе («через розницу» ~ «Розничный магазин»).
     ignore — слова, которые не считаются упоминанием (название таблицы: «строк продаж»
     не означает фильтр «Тип операции = 'Продажа'»), если значение не взято в кавычки."""
-    if value.lower() in quoted(question) or value.lower() in question.lower():
+    if value.lower() in quoted(question) or _contains_phrase(question, value):
         return True  # значение названо дословно («VK Реклама», «Мобильное приложение»)
     value_words = words(value)
     if not value_words:  # короткие значения: «Да», «VK»
-        return value.lower() in question.lower()
+        return _contains_phrase(question, value)
     asked = words(question)
     if ignore:
         asked = {q for q in asked if not any(same_word(q, w) for w in ignore)}
@@ -82,12 +88,13 @@ def mentions(question: str, value: str, ignore: set[str] | None = None) -> bool:
 # ---------- разбор вопроса ----------
 
 _TOP = re.compile(r"\bтоп\b|\bтоп-?\d+|самы[йхеаяо]|больше всего|меньше всего|наибол|наимен|"
+                  r"чаще всего|реже всего|"
                   r"лидер|лучш|худш|первы[хе]\s+\d+|\d+\s+(самых|лучших|худших|крупнейших)",
                   re.IGNORECASE)
 _TOP_N = re.compile(r"топ[- ]?(\d+)|первы[хе]\s+(\d+)|(\d+)\s+(?:самых|лучших|худших|крупнейших)",
                     re.IGNORECASE)
 # «по категориям», «по каналам», «в каждом статусе», «для каждого города», «в разрезе»
-_GROUPS = re.compile(r"\bпо\s+(кажд\w*|\w+(ам|ям|ах|ях)\b)|\b(в|для)\s+кажд\w*|в\s+разрезе|"
+_GROUPS = re.compile(r"\bпо\s+(кажд\w*|\w+(ам|ям|ах|ях)\b)|\b(в|для|у)\s+кажд\w*|в\s+разрезе|"
                      r"\bразбивк|\bраспредел", re.IGNORECASE)
 # Разбивка по времени — только явные фразы: «по месяцам», «в каждом месяце», «помесячно».
 # «за сентябрь 2025 года» — это фильтр, а не группировка.
@@ -229,9 +236,21 @@ def _check_group_by(sql: str, question: str, columns: list[str],
         return []
     clause = re.sub(r"(date_trunc|extract|date_part)\s*\([^)]*\)", " ", m.group(1), flags=re.IGNORECASE)
     asked = _asked_words(question, ignore)
+    grouped = {m.group(2).lower() for m in
+               re.finditer(r"\b(кажд\w*|по|разрезе)\s+([а-яёa-z]+)", question, re.IGNORECASE)}
     values = values or {}
+
+    def named(column: str) -> bool:
+        col_words = _short_words(column)
+        if overlap(asked, col_words):
+            return True
+        # «Сколько задач у каждой команды?» в таблице «Задачи команд»: колонка «Команда»
+        # названа словом из названия таблицы, но стоит в разбивке («у каждой команды»,
+        # «по командам») — это упоминание колонки. «Задач команд в каждом статусе» — нет.
+        return bool(col_words) and any(same_word(w, c) for w in grouped for c in col_words)
+
     extra = [c for c in re.findall(r'"([^"]+)"', clause)
-             if c in columns and not overlap(asked, _short_words(c))
+             if c in columns and not named(c)
              # «Сравни Яндекс Директ и VK Рекламу» — названы значения колонки «Площадка»
              and not any(mentions(question, v, ignore) for v in values.get(c, []))]
     if not extra:
@@ -294,12 +313,20 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if intent.is_count and noun and numeric_columns:
         # «Номер события в сессии» — порядковый номер, а не количество: его не суммируют
         amounts = [c for c in numeric_columns if not re.match(r"(номер|код|id)\b", c, re.IGNORECASE)]
-        matching = [c for c in amounts if any(same_word(noun, w) for w in words(c))]
+        matching = [c for c in amounts if any(same_word(noun, w) for w in words(c))
+                    # «сколько штук» -> «Количество, шт.» (слово «шт» слишком короткое для words)
+                    or (noun.startswith("штук") and re.search(r"\bшт\b", c.lower()))]
         summed = [c for c in matching
                   if re.search(r'sum\s*\(\s*(t\.)?"' + re.escape(c) + '"', sql, re.IGNORECASE)]
         if matching and not summed:
             options = " или ".join(f'SUM("{c}")' for c in matching)
             problems.append(f"«Сколько {noun}» — это сумма значений колонки: {options}, а не COUNT(*).")
+    if re.search(r"\bavg\s*\([^()]*\)\s*/\s*(count|sum)\s*\(", low):
+        problems.append("Не дели AVG(...) на COUNT/SUM: среднее уже посчитано — "
+                        "оставь просто AVG(\"колонка\").")
+    if re.search(r"\b100(\.0*)?\s*\*\s*avg\s*\(", low) and \
+            not re.search(r"процент|%|доля|долю|доли", question, re.IGNORECASE):
+        problems.append("Не умножай среднее на 100: проценты в вопросе не просили.")
     if intent.wants_distinct and "distinct" not in low:
         problems.append("В вопросе «разных/уникальных»: считай COUNT(DISTINCT \"колонка\").")
     if intent.time_grain and not re.search(r"date_trunc|extract|date_part", low):
