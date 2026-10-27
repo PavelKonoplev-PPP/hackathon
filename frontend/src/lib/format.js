@@ -96,3 +96,15 @@ export function prettyCategories(categories) {
     return `${m[3]}.${m[2]}.${m[1]}`
   })
 }
+
+// Склонение: plural(4, ['строка', 'строки', 'строк']) → «строки».
+export function plural(n, [one, few, many]) {
+  const a = Math.abs(n) % 100
+  const b = a % 10
+  if (a > 10 && a < 20) return many
+  if (b === 1) return one
+  if (b >= 2 && b <= 4) return few
+  return many
+}
+
+export const countText = (n, forms) => `${formatValue(n)} ${plural(n, forms)}`
