@@ -505,6 +505,7 @@ def process_chat_message(
                     "table": res.get("table"),
                     "sql": res.get("sql"),
                     "clarification": res.get("clarification"),
+                    "table_name": res.get("table_name") or table_name,
                 }
                 if recorder:
                     out["status"] = "completed"
@@ -569,12 +570,14 @@ def process_chat_message(
                 final_status = "clarification" if res.get("clarification") else "completed"
                 recorder.finish(final_status)
 
+            table_name_resolved = res.get("table_name") or table_name
             out = {
                 "answer": res.get("answer", ""),
                 "chart": res.get("chart"),
                 "table": res.get("table"),
                 "sql": res.get("sql"),
                 "clarification": res.get("clarification"),
+                "table_name": table_name_resolved,
             }
             if recorder:
                 out["status"] = "clarification" if res.get("clarification") else "completed"

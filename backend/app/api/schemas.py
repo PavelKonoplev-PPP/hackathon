@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import uuid
 
 from typing import Any, Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # Health schemas
@@ -88,6 +88,7 @@ class ChatResponse(BaseModel):
     table: TableSpec | None = None
     sql: str | None = None
     clarification: ClarificationSpec | None = None
+    table_name: str | None = None
     status: str = "completed"
     steps: list[ExecutionStep] = Field(default_factory=list)
     execution_time_ms: float | None = None
@@ -410,3 +411,54 @@ class SavedQueryExecuteResponse(BaseModel):
     status: str = "completed"
     execution_time_ms: float = 0.0
     result: ChatResponse
+
+# Business KPIs (BI-32 / Issue #78)
+class BusinessKpiItem(BaseModel):
+    """Audited business KPI metric specification."""
+
+    id: str
+    schema_name: str = Field(alias="schema", default="raw")
+    table: str
+    title: str
+    unit: str
+    description: str
+    expression: str | None = None
+    required_columns: list[str] = Field(default_factory=list)
+    status: Literal["proposed", "approved", "unavailable"] = "proposed"
+    requires_business_approval: bool = True
+    warnings: list[str] = Field(default_factory=list)
+    value: float | int | str | None = None
+    formatted_value: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class BusinessKpisResponse(BaseModel):
+    """Response model for /api/kpis endpoint."""
+
+    datasource_id: str
+    schema_name: str
+    kpis: list[BusinessKpiItem]
+    summary: dict[str, int]
+
+
+class BusinessKpiApproveRequest(BaseModel):
+    """Request to approve or sign off on a proposed KPI definition."""
+
+    approved_by: str = Field(min_length=1, max_length=100)
+    comment: str | None = None
+
+
+# PDF Export (BI-40 / Issue #82)
+class PdfExportRequest(BaseModel):
+    """Payload for analytical report PDF export."""
+
+    title: str = Field(default="Аналитический отчёт", max_length=255)
+    subtitle: str | None = None
+    datasource_id: str = "raw"
+    kpis: list[dict[str, Any]] = Field(default_factory=list)
+    table: TableSpec | None = None
+    chart: ChartSpec | None = None
+    sql: str | None = None
+    widgets: list[DashboardWidget] = Field(default_factory=list)
+
