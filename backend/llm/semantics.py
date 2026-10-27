@@ -227,8 +227,14 @@ def _short_words(text: str) -> set[str]:
     return {w for w in found if len(w) >= 3}
 
 
+def _alias_words(column: str, aliases: dict[str, list[str]] | None) -> set[str]:
+    """Слова синонимов колонки из бизнес-словаря («куда доставили» → «Город получения»)."""
+    return set().union(set(), *(words(a) for a in (aliases or {}).get(column, [])))
+
+
 def _check_group_by(sql: str, question: str, columns: list[str],
-                    ignore: set[str] | None, values: dict[str, list[str]] | None = None) -> list[str]:
+                    ignore: set[str] | None, values: dict[str, list[str]] | None = None,
+                    aliases: dict[str, list[str]] | None = None) -> list[str]:
     """GROUP BY только по тому, о чём спросили («в каждом статусе» — не по команде)."""
     m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
                   re.IGNORECASE | re.DOTALL)
@@ -242,7 +248,7 @@ def _check_group_by(sql: str, question: str, columns: list[str],
 
     def named(column: str) -> bool:
         col_words = _short_words(column)
-        if overlap(asked, col_words):
+        if overlap(asked, col_words | _alias_words(column, aliases)):
             return True
         # «Сколько задач у каждой команды?» в таблице «Задачи команд»: колонка «Команда»
         # названа словом из названия таблицы, но стоит в разбивке («у каждой команды»,
@@ -260,12 +266,13 @@ def _check_group_by(sql: str, question: str, columns: list[str],
 
 
 def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
-                          columns: list[str], ignore: set[str] | None, strict: bool) -> list[str]:
+                          columns: list[str], ignore: set[str] | None, strict: bool,
+                          aliases: dict[str, list[str]] | None = None) -> list[str]:
     """В вопросе есть условие («без карты», «через розницу»), а фильтра в SQL нет."""
     if not strict:
         return []
     asked = _asked_words(question, ignore)
-    column_words = set().union(set(), *(words(c) for c in columns))
+    column_words = set().union(set(), *(words(c) | _alias_words(c, aliases) for c in columns))
     # слова, которые называют колонку («по категориям товаров»), — это разрез, а не условие
     condition_words = {q for q in asked if not any(same_word(q, w) for w in column_words)}
     # слова, уже покрытые фильтрами запроса («без карты» -> 'Без карты лояльности')
@@ -297,13 +304,15 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
 def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
               strict: bool = True, ignore: set[str] | None = None,
               numeric_columns: list[str] | None = None,
-              columns: list[str] | None = None) -> list[str]:
+              columns: list[str] | None = None,
+              aliases: dict[str, list[str]] | None = None) -> list[str]:
     """Смысловые проблемы SQL относительно вопроса. Пустой список — всё в порядке.
 
     strict=False (последняя попытка) — не придираемся к упоминанию фильтров в вопросе.
     ignore — слова названия таблицы (не считаются упоминанием значения).
     numeric_columns — числовые колонки: «сколько кликов» при колонке «Клики» — это SUM.
     columns — все колонки таблицы: для проверки группировок и пропущенных фильтров.
+    aliases — {колонка: синонимы} из бизнес-словаря: синоним тоже называет колонку.
     """
     problems = []
     low = sql.lower()
@@ -339,9 +348,9 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
         problems.append("Запрос должен брать данные из таблицы t.")
 
     if columns:
-        problems += _check_group_by(sql, question, columns, ignore, values)
+        problems += _check_group_by(sql, question, columns, ignore, values, aliases)
         problems += check_money(sql, question, columns)
-        problems += _check_missing_filter(sql, question, values, columns, ignore, strict)
+        problems += _check_missing_filter(sql, question, values, columns, ignore, strict, aliases)
 
     value_owner = {v.lower(): col for col, vs in values.items() for v in vs}
     for column, op, raw in _FILTER.findall(sql):
@@ -608,9 +617,13 @@ def check_destructive_mutation(question: str) -> RefusalInfo | None:
 
 
 def detect_out_of_scope(question: str) -> RefusalInfo | None:
-    """Поиск запросов метрик или сущностей, отсутствующих в нашем датасете."""
+    """Поиск запросов метрик или сущностей, отсутствующих в нашем датасете.
+    Термин, подтверждённый в бизнес-словаре («CSAT» → «Оценка клиента», BI-37), — не отказ."""
     for topic, pattern, explanation, suggestions in UNSUPPORTED_METRICS:
         if pattern.search(question):
+            from .glossary import trusted_term  # glossary сам импортирует semantics
+            if trusted_term(question):
+                continue
             return RefusalInfo(
                 topic=topic,
                 explanation=explanation,
