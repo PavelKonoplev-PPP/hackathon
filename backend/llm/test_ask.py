@@ -66,6 +66,31 @@ class GuardTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_caches_are_per_datasource(self):
+        """Две внешние базы с одинаковой public.sales не делят значения категорий."""
+        from backend.llm import sql_runner as sr
+
+        class Info:
+            def __init__(self, host, db):
+                self.host, self.port, self.dbname = host, 5432, db
+
+        class Conn:
+            def __init__(self, host, db):
+                self.info = Info(host, db)
+
+        class Runner(sr.PostgresRunner):
+            def _fetch(self, query, limit):
+                return ["v"], [(self.conn.info.dbname,)]
+
+        sr.clear_values_cache()
+        table = {"name": "sales", "columns": [
+            {"name": "Канал", "inferred_type": "category", "sample_distinct": 3}]}
+        shop = Runner(Conn("10.0.0.5", "shop"), schema="public").category_values(table)
+        crm = Runner(Conn("10.0.0.9", "crm"), schema="public").category_values(table)
+        self.assertEqual(shop, {"Канал": ["shop"]})
+        self.assertEqual(crm, {"Канал": ["crm"]})
+        sr.clear_values_cache()
+
     def test_build_query_casts_only_safe_columns(self):
         table = {"name": "data_01_Продажи", "columns": [
             {"name": "Цена, руб.", "conversion": {"target_type": "decimal", "policy": "safe_complete"}},

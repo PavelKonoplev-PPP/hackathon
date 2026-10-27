@@ -31,10 +31,10 @@ CASTABLE_POLICIES = {"safe_complete", "safe_with_nulls"}
 
 # Значения категорий меняются только при новой загрузке данных, а backend создаёт
 # новый runner на каждый запрос — поэтому кэш общий для процесса.
-_VALUES_CACHE: dict[tuple[str, str], dict[str, list[str]]] = {}
+_VALUES_CACHE: dict[tuple[str, str, str], dict[str, list[str]]] = {}
 
 
-_RANGE_CACHE: dict[tuple[str, str, str], tuple] = {}
+_RANGE_CACHE: dict[tuple[str, str, str, str], tuple] = {}
 
 
 def clear_values_cache() -> None:
@@ -97,6 +97,15 @@ class QueryResult:
     truncated: bool = False
 
 
+def _connection_key(conn) -> str:
+    """«host:port/dbname» из psycopg-соединения; без него — id объекта (не смешиваем)."""
+    info = getattr(conn, "info", None)
+    host = getattr(info, "host", None)
+    if info is not None and host is not None:
+        return f"{host}:{getattr(info, 'port', '')}/{getattr(info, 'dbname', '')}"
+    return f"conn-{id(conn)}"
+
+
 @dataclass
 class PostgresRunner:
     """Выполняет запросы модели. Соединение (psycopg 3) создаёт backend.
@@ -106,6 +115,9 @@ class PostgresRunner:
     """
     conn: object
     schema: str = "raw"
+    # Кэши общие для процесса: ключ включает сам источник (сервер:порт/база), чтобы
+    # две внешние PostgreSQL с одинаковой public.sales не делили значения категорий.
+    source: str | None = None
     max_rows: int = 200
     timeout_ms: int = 20000
 
@@ -130,6 +142,10 @@ class PostgresRunner:
         )
         return cls(conn, schema=os.getenv("POSTGRES_SCHEMA", "raw"))
 
+    @property
+    def source_key(self) -> str:
+        return self.source or _connection_key(self.conn)
+
     def _fetch(self, query: str, limit: int) -> tuple[list[str], list[tuple]]:
         with self.conn.transaction():
             cur = self.conn.cursor()
@@ -147,7 +163,7 @@ class PostgresRunner:
 
     def category_values(self, table: dict, max_values: int = 15) -> dict[str, list[str]]:
         """Значения категорий (их немного), чтобы модель писала верные фильтры WHERE."""
-        key = (self.schema, table["name"])
+        key = (self.source_key, self.schema, table["name"])
         if key in _VALUES_CACHE:
             return _VALUES_CACHE[key]
         values = {}
@@ -169,7 +185,7 @@ class PostgresRunner:
 
     def date_range(self, table: dict, column: str) -> tuple:
         """(минимум, максимум) колонки с датой — для «сентябрь» без года и «прошлый месяц»."""
-        key = (self.schema, table["name"], column)
+        key = (self.source_key, self.schema, table["name"], column)
         if key not in _RANGE_CACHE:
             result = self.run(table, f'SELECT MIN({quote_ident(column)}), MAX({quote_ident(column)}) FROM t')
             _RANGE_CACHE[key] = tuple(result.rows[0]) if result.rows else (None, None)
