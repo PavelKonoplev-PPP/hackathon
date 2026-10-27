@@ -30,6 +30,7 @@ from collections import OrderedDict
 from . import advanced_analytics as adv
 from . import compare as cmp
 from . import glossary as gl
+from . import kpis as kp
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -179,6 +180,7 @@ def keyword_scores(question: str, tables: list[dict],
     detail (необязательно) получает для каждой таблицы число надёжных совпадений с
     названием таблицы или колонок (почти та же словоформа) — для разрешения ничьих."""
     asked = words(question)
+    approved_kpis = kp.load()
     scores = []
     for t in tables:
         name_words = words(display_table_name(t["name"]))
@@ -199,9 +201,10 @@ def keyword_scores(question: str, tables: list[dict],
                 structural += any(strong_word(q, w) for w in col_words)
             elif any(same_word(q, w) for w in value_words):
                 score += 1
-        scores.append(score)
+        bonus = kp.table_bonus(question, t, None, approved_kpis)  # утверждённый KPI этой таблицы
+        scores.append(score + bonus)
         if detail is not None:
-            detail.append(structural)
+            detail.append(structural + (1 if bonus else 0))
     return scores
 
 
@@ -800,6 +803,14 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
 
+    # Утверждённый бизнес-KPI (#57): формула из data/kpi-definitions.json, а не своя.
+    # В сравнении периодов не используем: FILTER к составной формуле так не приклеить.
+    kpi = None if periods else kp.for_question(full_question, table, catalog.get("schema"))
+    if kpi:
+        extra_hint += kp.hint(kpi)
+        trace["kpi"] = kpi.id
+        say(f"Утверждённый KPI: {kpi.title}")
+
     # 5. SQL с проверками
     values = (values_by_table or {}).get(table["name"])
     if values is None:
@@ -826,6 +837,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                                  aliases=gl.aliases(table))
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
+            if kpi and attempt < MAX_ATTEMPTS:
+                problems += kp.check(sql, kpi)
             if problems:
                 raise SQLRejected(" ".join(problems))
             result = runner.run(table, sql)
@@ -887,6 +900,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     note = missing_note(sql, table)
     if note:
         answer = f"{answer} {note}"
+    if kpi and kp.check(sql, kpi) == []:
+        answer = f"{answer} {kp.note(kpi)}"
 
     if cmp.is_compare(full_question):
         answer = f"{answer} {two_segment_difference(result.columns, result.rows)}".strip()
