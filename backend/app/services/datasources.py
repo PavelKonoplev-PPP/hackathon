@@ -564,6 +564,19 @@ def create_datasource(req: DataSourceCreateRequest) -> DataSourceResponse:
 
     save_datasources_file(stored)
 
+    # BI-09/10: Auto-catalog refresh
+    try:
+        import sys
+        repo_root = Path(__file__).resolve().parents[3]
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from db.refresh_catalog import refresh_catalog
+        refresh_catalog(Path('data'))
+        logger.info('Catalog auto-refreshed for datasource: %s', ds_id)
+    except Exception as exc:
+        logger.warning('Catalog auto-refresh failed for %s: %s', ds_id, exc)
+
+
     # 4. Return public representation with masked credentials
     return DataSourceResponse(
         id=ds_id,
