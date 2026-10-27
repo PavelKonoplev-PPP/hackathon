@@ -1,9 +1,3 @@
-"""Saved analytical queries management service (BI-35 / Issue #60).
-
-Provides persistent storage, retrieval, updating, deletion, and execution
-of saved analytical queries in data/saved_queries.json with atomic writes.
-"""
-
 from __future__ import annotations
 
 import json
@@ -27,6 +21,11 @@ from ..api.schemas import (
     SavedQueryUpdateRequest,
     TableSpec,
 )
+try:
+    from backend.llm.sql_guard import SQLRejected, validate_sql
+except ImportError:
+    from llm.sql_guard import SQLRejected, validate_sql
+
 from ..config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -224,6 +223,12 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
 
     # 1. Direct SQL execution path
     if query.sql:
+        # BI-35: Security hardening
+        try:
+            validate_sql(query.sql)
+        except SQLRejected as exc:
+            raise ValueError(f"Безопасность: запрос отклонён: {exc}")
+
         from ..db.session import get_reader_connection
 
         conn = None
