@@ -1,3 +1,4 @@
+import io
 import logging
 import tempfile
 from pathlib import Path
@@ -31,10 +32,14 @@ from .schemas import (
     SavedQueryUpdateRequest,
     SchemaResponse,
     TableSchema,
+    BusinessKpiApproveRequest,
+    BusinessKpiItem,
+    BusinessKpisResponse,
+    PdfExportRequest,
 )
 from ..db.session import check_db, get_reader_connection, get_writer_connection
 from ..llm.client import LLMError
-from ..services import agent, dashboards, datasources, query_tracker, saved_queries
+from ..services import agent, dashboards, datasources, kpis, pdf_export, query_tracker, saved_queries
 
 logger = logging.getLogger(__name__)
 
@@ -741,3 +746,89 @@ def stream_chat_endpoint(
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# -------------------------------------------------------------
+# Business KPIs (BI-32 / Issue #78)
+# -------------------------------------------------------------
+@router.get("/api/kpis", response_model=BusinessKpisResponse)
+def get_business_kpis_endpoint(
+    datasource_id: str = "raw",
+    calculate: bool = True,
+) -> BusinessKpisResponse:
+    """Return verified business KPIs with calculated values from technical catalog."""
+    data = kpis.get_kpis(datasource_id=datasource_id, calculate=calculate)
+    return BusinessKpisResponse(**data)
+
+
+@router.post("/api/kpis/{kpi_id}/approve", response_model=BusinessKpiItem)
+def approve_business_kpi_endpoint(
+    kpi_id: str,
+    body: BusinessKpiApproveRequest,
+    datasource_id: str = "raw",
+) -> BusinessKpiItem:
+    """Sign off / approve a proposed business KPI definition with persistent audit trail."""
+    updated = kpis.approve_kpi(
+        kpi_id=kpi_id,
+        approved_by=body.approved_by,
+        comment=body.comment,
+        datasource_id=datasource_id,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"KPI '{kpi_id}' not found.")
+    return BusinessKpiItem(**updated)
+
+
+# -------------------------------------------------------------
+# PDF Export (BI-40 / Issue #82)
+# -------------------------------------------------------------
+@router.get("/api/dashboards/{dashboard_id}/pdf")
+def export_dashboard_pdf_endpoint(dashboard_id: str) -> StreamingResponse:
+    """Generate and stream a professional PDF report for a saved dashboard."""
+    try:
+        pdf_bytes = pdf_export.export_dashboard_to_pdf(dashboard_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("Dashboard PDF export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"PDF export failed: {exc}") from exc
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="dashboard_{dashboard_id}.pdf"'
+        },
+    )
+
+
+@router.post("/api/export/pdf")
+def export_custom_pdf_endpoint(body: PdfExportRequest) -> StreamingResponse:
+    """Generate and stream a professional PDF report from query results, tables, or charts."""
+    try:
+        table_dict = body.table.model_dump() if body.table else None
+        chart_dict = body.chart.model_dump() if body.chart else None
+        widgets_list = [w.model_dump() for w in body.widgets] if body.widgets else None
+
+        pdf_bytes = pdf_export.build_pdf_document(
+            title=body.title,
+            subtitle=body.subtitle,
+            datasource_id=body.datasource_id,
+            kpis=body.kpis,
+            table_data=table_dict,
+            chart_data=chart_dict,
+            sql_text=body.sql,
+            widgets=widgets_list,
+        )
+    except Exception as exc:
+        logger.error("Custom PDF export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"PDF export failed: {exc}") from exc
+
+    filename = "analytical_report.pdf"
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
