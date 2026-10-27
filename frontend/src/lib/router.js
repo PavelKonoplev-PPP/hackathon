@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 
 export function parseRoute(hash) {
   const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean)
+  if (parts[0] === 'data') return { page: 'data' }
   if (parts[0] === 'dashboards') {
     return parts[1] ? { page: 'dashboard', id: decodeURIComponent(parts[1]) } : { page: 'dashboards' }
   }
