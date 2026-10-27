@@ -109,3 +109,12 @@ export function previewCsv(file, opts = {}) {
 export function uploadCsv(file, { replace = false, ...opts } = {}) {
   return request('/csv/upload', { method: 'POST', body: csvForm(file, { ...opts, extra: { replace } }) })
 }
+
+// Внешняя PostgreSQL (BI-09): проверка подключения и регистрация источника.
+export function testDatasource(body) {
+  return request('/datasources/test', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function createDatasource(body) {
+  return request('/datasources', { method: 'POST', body: JSON.stringify(body) })
+}
