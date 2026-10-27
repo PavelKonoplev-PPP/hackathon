@@ -1,34 +1,10 @@
 // Дашборды: сервер /api/dashboards (BI-15) или локальное хранилище в демо-режиме.
-import { isMock } from './api.js'
+import { isMock, request } from './api.js'
 import { deriveKpis } from './format.js'
 
 const LOCAL_KEY = 'bi-dashboards-local-v1'
 
-const UNAVAILABLE = 'сервер недоступен, проверьте, что бэкенд запущен'
-
-async function http(path, options = {}) {
-  let res
-  try {
-    res = await fetch(`/api${path}`, {
-      ...options,
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-    })
-  } catch {
-    throw new Error(UNAVAILABLE)
-  }
-  if (!res.ok) {
-    let detail = ''
-    try {
-      detail = (await res.json()).detail
-    } catch {
-      // тело без JSON
-    }
-    if (typeof detail === 'string' && detail) throw new Error(detail)
-    // 5xx без пояснения — бэкенд не отвечает (прокси разработки отдаёт пустой 500)
-    throw new Error(res.status >= 500 ? UNAVAILABLE : `Сервер ответил ошибкой ${res.status}`)
-  }
-  return res.status === 204 ? null : res.json()
-}
+const http = (path, options) => request(path, options)
 
 const remote = {
   list: () => http('/dashboards'),

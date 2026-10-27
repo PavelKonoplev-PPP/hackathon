@@ -3,8 +3,13 @@
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
-export async function mockReply(message) {
-  await delay(700)
+const MOCK_STEPS = ['Анализ намерения и безопасности', 'Выбор таблицы и сопоставление схемы', 'Генерация аналитического SQL', 'Выполнение запроса', 'Подготовка ответа']
+
+export async function mockReply(message, onProgress) {
+  for (let i = 0; i < MOCK_STEPS.length; i++) {
+    onProgress?.({ step: MOCK_STEPS[i], pct: Math.round(((i + 1) / MOCK_STEPS.length) * 95) })
+    await delay(160)
+  }
   const q = message.toLowerCase()
 
   if (q.includes('опиши данные') || (q.includes('что') && (q.includes('данн') || q.includes('есть')))) {

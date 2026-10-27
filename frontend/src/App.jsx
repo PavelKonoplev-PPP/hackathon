@@ -4,6 +4,8 @@ import Sidebar from './components/Sidebar.jsx'
 import DashboardsPage from './components/DashboardsPage.jsx'
 import DashboardPage from './components/DashboardPage.jsx'
 import ThemeSelect from './components/ThemeSelect.jsx'
+import DataPage from './components/DataPage.jsx'
+import { queriesApi } from './lib/queriesApi.js'
 import { AppContext } from './lib/appContext.js'
 import { useConversations } from './lib/store.js'
 import { dashboardsApi } from './lib/dashboardsApi.js'
@@ -17,6 +19,7 @@ export default function App() {
   const [dashboardsError, setDashboardsError] = useState(null)
   const [toast, setToast] = useState(null)
   const [datasources, setDatasources] = useState([])
+  const [queries, setQueries] = useState([])
 
   const refreshDashboards = useCallback(async () => {
     try {
@@ -46,14 +49,27 @@ export default function App() {
     refreshDatasources()
   }, [refreshDatasources])
 
+  const refreshQueries = useCallback(async () => {
+    try {
+      setQueries(await queriesApi.list())
+    } catch {
+      setQueries([])
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshQueries()
+  }, [refreshQueries])
+
   useEffect(() => {
     const onFocus = () => {
       refreshDashboards()
       refreshDatasources()
+      refreshQueries()
     }
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [refreshDashboards])
+  }, [refreshDashboards, refreshDatasources, refreshQueries])
 
   const notify = useCallback((text, href) => setToast({ text, href, key: Date.now() }), [])
 
@@ -63,7 +79,23 @@ export default function App() {
     return () => clearTimeout(t)
   }, [toast])
 
-  const { conversations, active, loadingIds, create, select, remove, send, setView, rename, buildDashboard, setDatasource } = useConversations({
+  const {
+    conversations,
+    active,
+    loadingIds,
+    progress,
+    create,
+    select,
+    remove,
+    send,
+    setView,
+    rename,
+    buildDashboard,
+    setDatasource,
+    startConversation,
+    clearTable,
+    runSavedQuery,
+  } = useConversations({
     onDashboardCreated: refreshDashboards,
   })
 
@@ -87,9 +119,38 @@ export default function App() {
     }
   }
 
+  function onAskTable(tableName, displayName) {
+    go('#/chat')
+    startConversation({ datasourceId: 'raw', tableName, title: `Таблица: ${displayName || tableName}` }, 'Опиши данные')
+  }
+
+  function onRunQuery(query) {
+    go('#/chat')
+    setMenuOpen(false)
+    runSavedQuery(active.id, query)
+  }
+
+  async function onRenameQuery(id, title) {
+    try {
+      await queriesApi.update(id, { title })
+      refreshQueries()
+    } catch (e) {
+      notify(`Не удалось переименовать запрос: ${e.message}`)
+    }
+  }
+
+  async function onDeleteQuery(id) {
+    try {
+      await queriesApi.remove(id)
+      refreshQueries()
+    } catch (e) {
+      notify(`Не удалось удалить запрос: ${e.message}`)
+    }
+  }
+
   const ctx = useMemo(
-    () => ({ dashboards, dashboardsError, refreshDashboards, notify, datasources }),
-    [dashboards, dashboardsError, refreshDashboards, notify, datasources]
+    () => ({ dashboards, dashboardsError, refreshDashboards, notify, datasources, refreshDatasources, queries, refreshQueries }),
+    [dashboards, dashboardsError, refreshDashboards, notify, datasources, refreshDatasources, queries, refreshQueries]
   )
 
   return (
@@ -106,8 +167,11 @@ export default function App() {
             <a href="#/chat" className={route.page === 'chat' ? 'nav-on' : ''}>
               Чат
             </a>
-            <a href="#/dashboards" className={route.page !== 'chat' ? 'nav-on' : ''}>
+            <a href="#/dashboards" className={route.page === 'dashboards' || route.page === 'dashboard' ? 'nav-on' : ''}>
               Дашборды
+            </a>
+            <a href="#/data" className={route.page === 'data' ? 'nav-on' : ''}>
+              Данные
             </a>
           </nav>
           <span className="spacer" />
@@ -122,6 +186,10 @@ export default function App() {
             dashboards={dashboards}
             dashboardsError={dashboardsError}
             onRetryDashboards={refreshDashboards}
+            queries={queries}
+            onRunQuery={onRunQuery}
+            onRenameQuery={onRenameQuery}
+            onDeleteQuery={onDeleteQuery}
             route={route}
             open={menuOpen}
             onClose={() => setMenuOpen(false)}
@@ -143,12 +211,15 @@ export default function App() {
               <Chat
                 conversation={active}
                 loading={loadingIds.includes(active.id)}
+                progress={progress[active.id]}
                 onSend={send}
                 onChangeView={setView}
                 onBuildDashboard={onBuildDashboard}
                 onChangeDatasource={onChangeDatasource}
+                onClearTable={clearTable}
               />
             )}
+            {route.page === 'data' && <DataPage onAskTable={onAskTable} />}
             {route.page === 'dashboards' && <DashboardsPage />}
             {route.page === 'dashboard' && <DashboardPage key={route.id} id={route.id} />}
           </main>
