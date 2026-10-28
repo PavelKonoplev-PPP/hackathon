@@ -328,6 +328,8 @@ class CsvUploadResponse(BaseModel):
     columns: list[str]
     warnings: list[str] = Field(default_factory=list)
     catalog_refreshed: bool = True
+    catalog_status: Literal["ready", "partial", "failed", "pending"] = "ready"
+    catalog_report: dict[str, Any] | None = None
     message: str | None = None
 
 

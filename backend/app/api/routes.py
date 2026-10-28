@@ -471,6 +471,7 @@ async def upload_csv_endpoint(
             except Exception as exc:
                 logger.warning("Table existence check skipped: %s", exc)
 
+        # Phase 1: CSV import inside writer transaction
         with get_writer_connection() as w_conn:
             res = import_uploaded_csv(
                 w_conn,
@@ -482,7 +483,40 @@ async def upload_csv_endpoint(
                 replace=replace,
             )
             w_conn.commit()
-            refresh_catalog(w_conn, table=res["table_name"], schema="raw")
+
+        # w_conn is closed and committed. Table is physically persisted in PostgreSQL.
+
+        # Phase 2: Metadata catalog profiling (strictly separate read-only connection)
+        catalog_report = None
+        catalog_refreshed = False
+        catalog_status = "failed"
+        upload_warnings = list(res.get("warnings") or [])
+
+        try:
+            with get_reader_connection() as r_conn:
+                raw_report = refresh_catalog(r_conn, table=res["table_name"], schema="raw")
+                catalog_report = raw_report if isinstance(raw_report, dict) else None
+                failed_audits = catalog_report.get("failed_audits", 0) if catalog_report else 0
+                unverified = catalog_report.get("unverified_columns", 0) if catalog_report else 0
+
+                if failed_audits > 0:
+                    catalog_status = "partial"
+                    catalog_refreshed = False
+                    upload_warnings.append(
+                        f"Каталог обновлён частично: ошибок аудита типов: {failed_audits}, "
+                        f"неверифицированных колонок: {unverified}."
+                    )
+                else:
+                    catalog_status = "ready"
+                    catalog_refreshed = True
+        except Exception as cat_exc:
+            logger.exception("Failed to refresh catalog after CSV import for %s: %s", res["table_name"], cat_exc)
+            catalog_status = "failed"
+            catalog_refreshed = False
+            upload_warnings.append(
+                f"Таблица создана, но каталогизация завершилась с ошибкой: {cat_exc}. "
+                "Агенту потребуется ручной пересбор каталога."
+            )
 
         try:
             from backend.llm.sql_runner import clear_values_cache
@@ -490,15 +524,24 @@ async def upload_csv_endpoint(
         except Exception:
             pass
 
+        if catalog_status == "ready":
+            msg = "Таблица успешно импортирована, каталог обновлён."
+        elif catalog_status == "partial":
+            msg = "Таблица импортирована, но каталог содержит частично неверифицированные колонки."
+        else:
+            msg = "Таблица успешно импортирована в базу, но каталог не был обновлён."
+
         return CsvUploadResponse(
             status="ok",
             schema_name=res["schema"],
             table_name=res["table_name"],
             row_count=res["row_count"],
             columns=res["columns"],
-            warnings=res.get("warnings", []),
-            catalog_refreshed=True,
-            message="Таблица успешно импортирована, каталог обновлён.",
+            warnings=upload_warnings,
+            catalog_refreshed=catalog_refreshed,
+            catalog_status=catalog_status,
+            catalog_report=catalog_report,
+            message=msg,
         )
     except HTTPException:
         raise

@@ -203,5 +203,132 @@ class KpisAndPdfTests(unittest.TestCase):
                     self.assertEqual(len(res_data["result"]["table"]["rows"]), 2)
 
 
+    # -----------------------------------------------------------------
+    # BI-08/10 (Issue #91): Separate CSV Commit and Read-only Cataloging
+    # -----------------------------------------------------------------
+    def test_csv_upload_refresh_catalog_failure_preserves_committed_import(self) -> None:
+        """Issue #91: If refresh_catalog fails after commit, endpoint returns 200 with catalog_status='failed'."""
+        from backend.app.api import routes
+
+        csv_content = b"col1;col2\nval1;val2\n"
+        with patch.object(routes, "get_reader_connection") as mock_r_conn:
+            mock_conn_r = MagicMock()
+            mock_r_conn.return_value.__enter__.return_value = mock_conn_r
+
+            with patch("db.csv_service.import_uploaded_csv") as mock_import, \
+                 patch("db.refresh_catalog.refresh_catalog", side_effect=RuntimeError("Lock timeout in catalog")) as mock_refresh, \
+                 patch.object(routes, "get_writer_connection") as mock_w_conn:
+                mock_w = MagicMock()
+                mock_w_conn.return_value.__enter__.return_value = mock_w
+                mock_import.return_value = {
+                    "schema": "raw",
+                    "table_name": "data_survived_orders",
+                    "row_count": 42,
+                    "columns": ["col1", "col2"],
+                    "warnings": [],
+                }
+
+                response = self.client.post(
+                    "/api/csv/upload",
+                    files={"file": ("survived_orders.csv", csv_content, "text/csv")},
+                    data={"replace": "true"},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(data["table_name"], "data_survived_orders")
+                self.assertEqual(data["row_count"], 42)
+                self.assertFalse(data["catalog_refreshed"])
+                self.assertEqual(data["catalog_status"], "failed")
+                self.assertTrue(any("Lock timeout" in w for w in data["warnings"]))
+                # Verify writer committed BEFORE refresh was attempted
+                mock_w.commit.assert_called_once()
+                mock_refresh.assert_called_once_with(mock_conn_r, table="data_survived_orders", schema="raw")
+
+    def test_csv_upload_partial_catalog_audit_reports_warnings(self) -> None:
+        """Issue #91: Partial catalog verification (failed_audits > 0) sets catalog_status='partial' and warnings."""
+        from backend.app.api import routes
+
+        csv_content = b"col1;col2\nval1;val2\n"
+        with patch.object(routes, "get_reader_connection") as mock_r_conn:
+            mock_conn_r = MagicMock()
+            mock_r_conn.return_value.__enter__.return_value = mock_conn_r
+
+            with patch("db.csv_service.import_uploaded_csv") as mock_import, \
+                 patch("db.refresh_catalog.refresh_catalog") as mock_refresh, \
+                 patch.object(routes, "get_writer_connection") as mock_w_conn:
+                mock_w = MagicMock()
+                mock_w_conn.return_value.__enter__.return_value = mock_w
+                mock_import.return_value = {
+                    "schema": "raw",
+                    "table_name": "data_partial_audit",
+                    "row_count": 100,
+                    "columns": ["col1", "col2"],
+                    "warnings": [],
+                }
+                mock_refresh.return_value = {
+                    "mode": "incremental",
+                    "failed_audits": 2,
+                    "unverified_columns": 3,
+                    "tables": 10,
+                }
+
+                response = self.client.post(
+                    "/api/csv/upload",
+                    files={"file": ("partial_audit.csv", csv_content, "text/csv")},
+                    data={"replace": "true"},
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertFalse(data["catalog_refreshed"])
+                self.assertEqual(data["catalog_status"], "partial")
+                self.assertTrue(any("ошибок аудита типов: 2" in w for w in data["warnings"]))
+                self.assertIsNotNone(data["catalog_report"])
+                self.assertEqual(data["catalog_report"]["failed_audits"], 2)
+
+    def test_csv_upload_strictly_uses_readonly_connection_for_catalog(self) -> None:
+        """Issue #91: Catalog profiling uses separate get_reader_connection, never the writer connection."""
+        from backend.app.api import routes
+
+        csv_content = b"col1;col2\nval1;val2\n"
+        with patch.object(routes, "get_reader_connection") as mock_r_conn, \
+             patch.object(routes, "get_writer_connection") as mock_w_conn, \
+             patch("db.csv_service.import_uploaded_csv") as mock_import, \
+             patch("db.refresh_catalog.refresh_catalog") as mock_refresh:
+            mock_reader = MagicMock(name="reader_conn")
+            mock_r_conn.return_value.__enter__.return_value = mock_reader
+
+            mock_writer = MagicMock(name="writer_conn")
+            mock_w_conn.return_value.__enter__.return_value = mock_writer
+
+            mock_import.return_value = {
+                "schema": "raw",
+                "table_name": "data_orders",
+                "row_count": 10,
+                "columns": ["col1", "col2"],
+                "warnings": [],
+            }
+            mock_refresh.return_value = {"failed_audits": 0, "unverified_columns": 0}
+
+            response = self.client.post(
+                "/api/csv/upload",
+                files={"file": ("orders.csv", csv_content, "text/csv")},
+                data={"replace": "true"},
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertTrue(data["catalog_refreshed"])
+            self.assertEqual(data["catalog_status"], "ready")
+
+            # Check that writer was NEVER passed to refresh_catalog
+            writer_passed = any(call.args and call.args[0] is mock_writer for call in mock_refresh.call_args_list)
+            self.assertFalse(writer_passed, "Writer connection was erroneously passed to refresh_catalog!")
+
+            # Check that reader was passed to refresh_catalog
+            reader_passed = any(call.args and call.args[0] is mock_reader for call in mock_refresh.call_args_list)
+            self.assertTrue(reader_passed, "Reader connection was NOT passed to refresh_catalog!")
+
+
 if __name__ == "__main__":
     unittest.main()

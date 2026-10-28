@@ -26,13 +26,14 @@
 | **Статусы** | [BI-07] Issue #35 | Статусы выполнения аналитического запроса: этапы выполнения (`steps`) с замером длительности (`duration_ms`), статусы (`status`: completed, clarification, refused, failed) и latency в `ChatResponse`; асинхронный запуск задач с трекингом прогресса (`POST /api/chat/jobs`, `GET /api/chat/jobs/{id}`) и SSE Server-Sent Events стриминг (`GET /api/chat/stream`). |
 | **Бизнес-KPI** | [BI-32] Issue #78 | Сервис `backend/app/services/kpis.py` и эндпоинты `GET /api/kpis` (расчёт live-значений через `PostgresRunner`) и `POST /api/kpis/{id}/approve` (персистентный аудит согласования в `data/kpi-definitions.json`). Контрольные значения подтверждены (Выручка: 2 684 326 520,31 руб., CTR: 2.23%). |
 | **PDF Экспорт** | [BI-40] Issue #82 | Сервис `backend/app/services/pdf_export.py` и эндпоинты `GET /api/dashboards/{id}/pdf` и `POST /api/export/pdf`. Корпоративное оформление, кириллические шрифты (Arial/DejaVu), таблицы, графики, карточки KPI и SQL. |
-| **Регрессия** | Issue #81 | Сквозная интеграционная регрессия подтверждена. Все 183 бэкенд-теста и 110 db-тестов зелёные. |
+| **Регрессия** | Issue #81 | Сквозная интеграционная регрессия подтверждена. Все 199 бэкенд-тестов и 110 db-тестов зелёные. |
+| **CSV & Каталог** | [BI-08/10] Issue #91 | Разделены транзакция commit импорта CSV и read-only каталогизация через отдельное `get_reader_connection()`. Исключение в каталоге не откатывает готовую таблицу и возвращает честный `catalog_status: 'failed'`. Учтены `failed_audits` / `unverified_columns` (`catalog_status: 'partial'`). |
 
 ---
 
 ## 2. Результаты верификации тестов
 
-* **Backend**: **183 passed, 2 skipped, 0 failed** (`backend\.venv\Scripts\pytest backend`).
+* **Backend**: **199 passed, 2 skipped, 0 failed** (`backend\.venv\Scripts\pytest backend`).
 * **Database**: **110 passed, 0 failed** (`backend\.venv\Scripts\python -m unittest discover -s db -p "test_*.py"`).
 * **Golden Checks**: **25/25 OK, 0 ошибок** (`backend\.venv\Scripts\python db/run_golden_checks.py`).
 * **Frontend**: не изменялся (директория `frontend/` строго изолирована).
