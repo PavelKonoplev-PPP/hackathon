@@ -422,9 +422,21 @@ Content-Type: `multipart/form-data`
   "columns": ["Номер заказа", "Город", "Сумма"],
   "warnings": [],
   "catalog_refreshed": true,
+  "catalog_status": "ready",
+  "catalog_report": {
+    "mode": "incremental",
+    "tables": 10,
+    "columns": 55,
+    "unverified_columns": 0,
+    "failed_audits": 0
+  },
   "message": "Таблица успешно импортирована, каталог обновлён."
 }
 ```
+Статусы каталогизации (`catalog_status`):
+- `"ready"`: профилирование и аудит типов завершены успешно (`failed_audits == 0`, `catalog_refreshed = true`).
+- `"partial"`: импорт завершён, но аудит типов выявил ошибки (`failed_audits > 0`, `catalog_refreshed = false`, предупреждения в `warnings`).
+- `"failed"`: импорт таблицы успешно зафиксирован в БД, но профилирование завершилось сбоем (`catalog_refreshed = false`). Ошибка не откатывает импортированную таблицу и возвращает HTTP 200 с предупреждением в `warnings`.
 
 
 ---
