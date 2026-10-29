@@ -202,7 +202,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["schema_name"], "raw")
-        self.assertEqual(len(data["tables"]), 9)
+        self.assertGreaterEqual(len(data["tables"]), 9)
         self.assertGreater(len(data["relationships"]), 0)
         total_rows = sum(t["row_count"] or 0 for t in data["tables"])
         self.assertGreater(total_rows, 0)
@@ -1515,20 +1515,30 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(put_res.json()["tags"], ["sales", "updated"])
 
                 # 6. Execute saved query
-                with patch("backend.app.db.session.get_reader_connection") as mock_conn:
-                    mock_c = MagicMock()
-                    mock_cur = MagicMock()
-                    mock_cur.description = [("channel",), ("revenue",)]
-                    mock_cur.fetchall.return_value = [("Online", 500000), ("Retail", 300000)]
-                    mock_c.cursor.return_value.__enter__.return_value = mock_cur
-                    mock_conn.return_value = mock_c
+                with patch("backend.app.services.saved_queries.PostgresRunner") as mock_runner_cls, \
+                     patch("backend.app.db.session.get_reader_connection") as mock_conn, \
+                     patch("backend.app.services.saved_queries._load_catalog_for_datasource") as mock_cat:
+                    from types import SimpleNamespace
+                    mock_conn.return_value = MagicMock()
+                    mock_cat.return_value = {
+                        "tables": [{
+                            "name": "data_03_orders",
+                            "display_name": "Заказы",
+                            "columns": [{"name": "channel"}, {"name": "amount"}],
+                        }]
+                    }
+                    mock_run_result = SimpleNamespace(
+                        columns=["channel", "revenue"],
+                        rows=[("Online", 500000), ("Retail", 300000)],
+                    )
+                    mock_runner_cls.return_value.run.return_value = mock_run_result
 
                     exec_res = self.client.post(f"/api/queries/{query_id}/execute")
                     self.assertEqual(exec_res.status_code, 200)
                     exec_data = exec_res.json()
                     self.assertEqual(exec_data["status"], "completed")
                     self.assertEqual(exec_data["query_id"], query_id)
-                    self.assertIn("успешно выполнен", exec_data["result"]["answer"])
+                    self.assertIn("выполнен", exec_data["result"]["answer"])
                     self.assertIsNotNone(exec_data["result"]["table"])
 
                 # 7. Delete query

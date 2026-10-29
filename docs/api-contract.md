@@ -422,9 +422,21 @@ Content-Type: `multipart/form-data`
   "columns": ["Номер заказа", "Город", "Сумма"],
   "warnings": [],
   "catalog_refreshed": true,
+  "catalog_status": "ready",
+  "catalog_report": {
+    "mode": "incremental",
+    "tables": 10,
+    "columns": 55,
+    "unverified_columns": 0,
+    "failed_audits": 0
+  },
   "message": "Таблица успешно импортирована, каталог обновлён."
 }
 ```
+Статусы каталогизации (`catalog_status`):
+- `"ready"`: профилирование и аудит типов завершены успешно (`failed_audits == 0`, `catalog_refreshed = true`).
+- `"partial"`: импорт завершён, но аудит типов выявил ошибки (`failed_audits > 0`, `catalog_refreshed = false`, предупреждения в `warnings`).
+- `"failed"`: импорт таблицы успешно зафиксирован в БД, но профилирование завершилось сбоем (`catalog_refreshed = false`). Ошибка не откатывает импортированную таблицу и возвращает HTTP 200 с предупреждением в `warnings`.
 
 
 ---
@@ -524,3 +536,92 @@ Query параметры:
   (`title`, `question`, `sql`, `datasource_id`, `table_name`, `chart_config.type` — выбранный вид).
   Раздел «Запросы» в боковой панели: запуск — `POST /api/queries/{id}/execute` (результат в текущий диалог),
   переименование — `PUT`, удаление — `DELETE`. В демо-режиме запросы хранятся в localStorage.
+
+
+---
+
+## Бизнес-KPI (BI-32 / Issue #78)
+
+Эндпоинты для получения проверенных бизнес-метрик из технического каталога схемы с вычислением живых значений и аудитом согласования.
+
+### 1. GET /api/kpis
+Возвращает список бизнес-KPI для указанного источника данных.
+- **Параметры**:
+  - `datasource_id` (string, default `"raw"`): идентификатор источника данных.
+  - `calculate` (boolean, default `true`): вычислять ли актуальные значения метрик в базе данных через read-only `PostgresRunner`.
+- **Ответ (200 OK)**:
+```json
+{
+  "datasource_id": "raw",
+  "schema_name": "raw",
+  "kpis": [
+    {
+      "id": "sales_revenue",
+      "schema": "raw",
+      "table": "data_01_Продажи",
+      "title": "Сумма с учётом скидки",
+      "unit": "RUB",
+      "description": "Сумма строк по формуле количество × цена × (1−скидка/100).",
+      "expression": "SUM(\"Количество, шт.\" * \"Цена до скидки за единицу, руб.\" * (1 - \"Скидка, %\" / 100.0))",
+      "required_columns": ["Количество, шт.", "Цена до скидки за единицу, руб.", "Скидка, %"],
+      "status": "proposed",
+      "requires_business_approval": true,
+      "warnings": [],
+      "value": 2684326520.31,
+      "formatted_value": "2 684 326 520,31 руб."
+    }
+  ],
+  "summary": {
+    "proposed": 8,
+    "approved": 0,
+    "unavailable": 0,
+    "total": 8
+  }
+}
+```
+
+### 2. POST /api/kpis/{kpi_id}/approve
+Согласование (sign-off) предложенного KPI ответственным лицом. Сохраняется персистентно в `data/kpi-definitions.json`.
+- **Тело запроса**:
+```json
+{
+  "approved_by": "Chief Financial Officer",
+  "comment": "Формула согласована с финдепартаментом"
+}
+```
+- **Ответ (200 OK)**: обновлённый объект `BusinessKpiItem` со статусом `"approved"` и `"requires_business_approval": false`.
+
+---
+
+## Экспорт отчётов в PDF (BI-40 / Issue #82)
+
+Сквозной экспорт аналитических данных, дашбордов и результатов запросов в PDF с поддержкой кириллицы и корпоративного оформления.
+
+### 1. GET /api/dashboards/{dashboard_id}/pdf
+Генерация и потоковая выгрузка PDF-отчёта по сохранённому дашборду.
+- **Ответ (200 OK)**: бинарный поток `application/pdf`, заголовок `Content-Disposition: attachment; filename="dashboard_{id}.pdf"`.
+
+### 2. POST /api/export/pdf
+Генерация произвольного аналитического отчёта (таблицы, графики, KPI, SQL, выводы).
+- **Тело запроса**:
+```json
+{
+  "title": "Сводный финансовый отчёт",
+  "subtitle": "Автоматическая выгрузка за 2026 год",
+  "datasource_id": "raw",
+  "kpis": [
+    {
+      "title": "Выручка",
+      "formatted_value": "2 684 326 520,31 руб.",
+      "status": "approved",
+      "description": "Сумма строк продаж"
+    }
+  ],
+  "table": {
+    "columns": ["Канал", "Выручка"],
+    "rows": [["Online", 1500000], ["Retail", 1184326520]]
+  },
+  "sql": "SELECT channel, SUM(amount) FROM raw.sales GROUP BY channel"
+}
+```
+- **Ответ (200 OK)**: бинарный поток `application/pdf`.
