@@ -48,7 +48,10 @@ def table_row_count(table: dict) -> int | None:
     if exact:
         return max(exact)
     estimate = table.get("estimated_total_rows")
-    return estimate if isinstance(estimate, int) and estimate >= 0 else None
+    if isinstance(estimate, int) and estimate >= 0:
+        return estimate
+    rows = table.get("row_count") or table.get("rows")
+    return rows if isinstance(rows, int) and rows >= 0 else None
 
 
 def display_table_name(name: str) -> str:

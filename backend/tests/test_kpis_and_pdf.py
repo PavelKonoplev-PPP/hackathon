@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-from backend.app.services import dashboards, kpis, saved_queries
+from backend.app.services import dashboards, datasources, kpis, saved_queries
 
 
 class KpisAndPdfTests(unittest.TestCase):
@@ -328,6 +328,199 @@ class KpisAndPdfTests(unittest.TestCase):
             # Check that reader was passed to refresh_catalog
             reader_passed = any(call.args and call.args[0] is mock_reader for call in mock_refresh.call_args_list)
             self.assertTrue(reader_passed, "Reader connection was NOT passed to refresh_catalog!")
+
+    # -----------------------------------------------------------------
+    # BI-09/10 (Issue #79): Auto-catalog refresh for external PostgreSQL
+    # -----------------------------------------------------------------
+    def test_external_datasource_create_auto_refreshes_catalog_with_connection(self) -> None:
+        """Issue #79: create_datasource calls build_external_catalog with a DB connection, not a Path object."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            mock_conn = MagicMock(name="ext_db_conn")
+            mock_report = {
+                "datasource_id": "ext_dwh",
+                "schema": "public",
+                "tables": 2,
+                "columns": 5,
+                "failed_audits": 0,
+                "catalog_path": str(Path(tmp_dir) / "external-catalogs" / "ext_dwh" / "schema-catalog.json"),
+            }
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file), \
+                 patch.object(datasources, "test_postgres_connection", return_value=(True, 5.0, ["orders", "users"], "OK")), \
+                 patch.object(datasources, "get_datasource_connection", return_value=(mock_conn, "public", {})), \
+                 patch("db.external_catalog.build_external_catalog", return_value=mock_report) as mock_build:
+
+                response = self.client.post(
+                    "/api/datasources",
+                    json={
+                        "id": "ext_dwh",
+                        "name": "Enterprise DWH",
+                        "host": "dwh.internal",
+                        "port": 5432,
+                        "dbname": "dwh_prod",
+                        "user": "bi_reader",
+                        "password": "secret_pwd",
+                        "schema_name": "public",
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(data["id"], "ext_dwh")
+                self.assertEqual(data["password"], "******")
+
+                # Verify build_external_catalog was called with mock_conn (NOT a Path!)
+                mock_build.assert_called_once()
+                args, kwargs = mock_build.call_args
+                self.assertIs(args[0], mock_conn, "First arg to build_external_catalog must be the DB connection!")
+                self.assertEqual(kwargs.get("datasource_id"), "ext_dwh")
+                self.assertEqual(kwargs.get("schema"), "public")
+
+                # Verify connection was closed
+                mock_conn.close.assert_called_once()
+
+    def test_external_datasource_create_catalog_failure_is_non_blocking(self) -> None:
+        """Issue #79: If auto-catalog fails (e.g. network timeout), datasource creation still succeeds."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file), \
+                 patch.object(datasources, "test_postgres_connection", return_value=(True, 5.0, ["orders"], "OK")), \
+                 patch.object(datasources, "get_datasource_connection", side_effect=RuntimeError("Connection refused by firewall")):
+
+                response = self.client.post(
+                    "/api/datasources",
+                    json={
+                        "id": "ext_unreachable",
+                        "name": "Firewalled DB",
+                        "host": "isolated.internal",
+                        "port": 5432,
+                        "dbname": "isolated_db",
+                        "user": "bi_reader",
+                        "password": "secret_pwd",
+                        "schema_name": "public",
+                    },
+                )
+                # Must return HTTP 200, logging warning rather than failing registration
+                self.assertEqual(response.status_code, 200)
+                data = response.json()
+                self.assertEqual(data["id"], "ext_unreachable")
+                self.assertTrue(temp_file.is_file())
+
+    def test_external_datasource_refresh_endpoint(self) -> None:
+        """Issue #79: POST /api/datasources/{id}/refresh builds catalog and returns report."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            mock_conn = MagicMock(name="ext_db_conn")
+            mock_report = {
+                "datasource_id": "ext_dwh",
+                "schema": "public",
+                "tables": 3,
+                "columns": 10,
+                "failed_audits": 0,
+                "catalog_path": "data/external-catalogs/ext_dwh/schema-catalog.json",
+            }
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file), \
+                 patch.object(datasources, "get_datasource_connection", return_value=(mock_conn, "public", {})), \
+                 patch("db.external_catalog.build_external_catalog", return_value=mock_report):
+
+                # 1. Reject 'raw'
+                raw_resp = self.client.post("/api/datasources/raw/refresh")
+                self.assertEqual(raw_resp.status_code, 400)
+
+                # 2. Refresh external datasource
+                resp = self.client.post("/api/datasources/ext_dwh/refresh")
+                self.assertEqual(resp.status_code, 200)
+                data = resp.json()
+                self.assertEqual(data["status"], "ok")
+                self.assertEqual(data["datasource_id"], "ext_dwh")
+                self.assertTrue(data["catalog_refreshed"])
+                self.assertEqual(data["report"]["tables"], 3)
+                mock_conn.close.assert_called_once()
+
+    def test_external_datasource_e2e_real_catalog_file_and_schema_endpoint(self) -> None:
+        """Issue #79: End-to-end registration writes catalog file and GET /api/schema serves it."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_file = Path(tmp_dir) / "datasources.json"
+
+            mock_conn = MagicMock(name="ext_db_conn")
+            mock_conn.transaction.return_value.__enter__ = MagicMock()
+            mock_conn.transaction.return_value.__exit__ = MagicMock(return_value=False)
+
+            fake_profile = {
+                "schema": "public",
+                "tables": [
+                    {
+                        "name": "crm_leads",
+                        "row_count": 4200,
+                        "columns": [
+                            {"name": "lead_id", "inferred_type": "integer", "null_count": 0},
+                            {"name": "status", "inferred_type": "text", "null_count": 5},
+                        ],
+                    }
+                ],
+            }
+            fake_audit = {"summary": {"failed_columns": 0}, "columns": {}}
+            fake_catalog = {
+                "schema": "public",
+                "summary": {"tables": 1, "columns": 2, "rows": 4200},
+                "tables": [
+                    {
+                        "name": "crm_leads",
+                        "row_count": 4200,
+                        "columns": [
+                            {"name": "lead_id", "data_type": "integer", "nullable": False},
+                            {"name": "status", "data_type": "text", "nullable": True},
+                        ],
+                    }
+                ],
+            }
+
+            with patch.object(datasources, "get_datasources_path", return_value=temp_file), \
+                 patch.object(datasources, "test_postgres_connection", return_value=(True, 4.0, ["crm_leads"], "OK")), \
+                 patch.object(datasources, "get_datasource_connection", return_value=(mock_conn, "public", {})), \
+                 patch("db.external_catalog.profile_database", return_value=fake_profile), \
+                 patch("db.external_catalog.audit_profile", return_value=fake_audit), \
+                 patch("db.external_catalog.build_catalog", return_value=fake_catalog):
+
+                # 1. Register datasource
+                create_resp = self.client.post(
+                    "/api/datasources",
+                    json={
+                        "id": "ext_crm",
+                        "name": "CRM Leads System",
+                        "host": "crm.internal",
+                        "port": 5432,
+                        "dbname": "crm_db",
+                        "user": "bi_reader",
+                        "password": "secret_pwd",
+                        "schema_name": "public",
+                    },
+                )
+                self.assertEqual(create_resp.status_code, 200)
+
+                # 2. Verify catalog file was written on disk
+                cat_file = Path(tmp_dir) / "external-catalogs" / "ext_crm" / "schema-catalog.json"
+                self.assertTrue(cat_file.is_file(), f"Expected catalog file at {cat_file}")
+
+                # 3. Verify GET /api/schema?datasource_id=ext_crm serves the generated catalog
+                schema_resp = self.client.get("/api/schema?datasource_id=ext_crm")
+                self.assertEqual(schema_resp.status_code, 200)
+                schema_data = schema_resp.json()
+                self.assertEqual(schema_data["schema_name"], "public")
+                self.assertEqual(len(schema_data["tables"]), 1)
+                self.assertEqual(schema_data["tables"][0]["name"], "crm_leads")
+                self.assertEqual(schema_data["tables"][0]["row_count"], 4200)
+                self.assertEqual(len(schema_data["tables"][0]["columns"]), 2)
+                self.assertEqual(schema_data["tables"][0]["columns"][0]["name"], "lead_id")
+
+                # 4. Verify saved_queries._load_catalog_for_datasource loads the catalog
+                loaded_cat = saved_queries._load_catalog_for_datasource("ext_crm")
+                self.assertIsNotNone(loaded_cat)
+                self.assertEqual(loaded_cat["datasource_id"], "ext_crm")
 
 
 if __name__ == "__main__":

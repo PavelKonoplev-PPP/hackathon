@@ -2,6 +2,7 @@ import io
 import logging
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -91,7 +92,10 @@ except ImportError:
             if exact:
                 return max(exact)
             estimate = table.get("estimated_total_rows")
-            return estimate if isinstance(estimate, int) and estimate >= 0 else None
+            if isinstance(estimate, int) and estimate >= 0:
+                return estimate
+            rows = table.get("row_count") or table.get("rows")
+            return rows if isinstance(rows, int) and rows >= 0 else None
 
 router = APIRouter()
 
@@ -148,6 +152,14 @@ def get_schema(datasource_id: str | None = None) -> SchemaResponse:
                 ext_cat = read_external_catalog(Path("data"), ds_clean)
         except Exception:
             ext_cat = None
+
+        if not ext_cat:
+            try:
+                data_dir = datasources.get_datasources_path().parent
+                if Path(data_dir).resolve() != Path("data").resolve():
+                    ext_cat = read_external_catalog(data_dir, ds_clean)
+            except Exception:
+                pass
 
         if not ext_cat:
             stored_ds = datasources.get_all_datasources()
@@ -580,6 +592,36 @@ def create_datasource(body: DataSourceCreateRequest) -> DataSourceResponse:
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to register datasource: {exc}"
+        ) from exc
+
+
+@router.post("/api/datasources/{datasource_id}/refresh")
+@router.post("/datasources/{datasource_id}/refresh")
+def refresh_datasource_catalog_endpoint(datasource_id: str) -> dict[str, Any]:
+    """Trigger catalog profiling and refresh for an external PostgreSQL datasource."""
+    ds_clean = datasource_id.strip()
+    if ds_clean.lower() == "raw":
+        raise HTTPException(
+            status_code=400,
+            detail="Datasource 'raw' catalog is refreshed via /api/csv/upload or db/refresh_catalog",
+        )
+    try:
+        report = datasources.refresh_datasource_catalog(ds_clean)
+        if not report:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to build catalog for datasource '{datasource_id}'"
+            )
+        return {
+            "status": "ok",
+            "datasource_id": ds_clean,
+            "catalog_refreshed": True,
+            "report": report,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to refresh datasource catalog: {exc}"
         ) from exc
 
 

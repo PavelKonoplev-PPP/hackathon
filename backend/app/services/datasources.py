@@ -498,6 +498,39 @@ def get_datasource_connection(ds_id: str) -> tuple[psycopg.Connection, str, dict
     return conn, schema_name, creds
 
 
+def refresh_datasource_catalog(ds_id: str, root_dir: Path | None = None) -> dict[str, Any] | None:
+    """Build and persist schema catalog for external PostgreSQL datasource in read-only mode."""
+    import sys
+    repo_root = Path(__file__).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    try:
+        from db.external_catalog import build_external_catalog
+    except ImportError:
+        from ...db.external_catalog import build_external_catalog  # type: ignore
+
+    if root_dir is None:
+        data_dir = get_datasources_path().parent
+        root_dir = data_dir if data_dir.is_dir() else Path("data")
+
+    conn, schema_name, _ = get_datasource_connection(ds_id)
+    try:
+        report = build_external_catalog(
+            conn,
+            datasource_id=ds_id,
+            schema=schema_name or "public",
+            root=root_dir,
+        )
+        logger.info("Catalog auto-refreshed for external datasource %s: %s", ds_id, report)
+        return report
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def create_datasource(req: DataSourceCreateRequest) -> DataSourceResponse:
     """Validate connection and register an external PostgreSQL source with encrypted password."""
     # 1. Validate connection (which internally validates host safety)
@@ -564,15 +597,9 @@ def create_datasource(req: DataSourceCreateRequest) -> DataSourceResponse:
 
     save_datasources_file(stored)
 
-    # BI-09/10: Auto-catalog refresh
+    # BI-09/10: Auto-catalog refresh for external postgres datasource
     try:
-        import sys
-        repo_root = Path(__file__).resolve().parents[3]
-        if str(repo_root) not in sys.path:
-            sys.path.insert(0, str(repo_root))
-        from db.refresh_catalog import refresh_catalog
-        refresh_catalog(Path('data'))
-        logger.info('Catalog auto-refreshed for datasource: %s', ds_id)
+        refresh_datasource_catalog(ds_id)
     except Exception as exc:
         logger.warning('Catalog auto-refresh failed for %s: %s', ds_id, exc)
 

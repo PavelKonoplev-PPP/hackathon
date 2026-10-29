@@ -261,6 +261,15 @@ def filter_catalog_for_scope(
         except Exception:
             ext_cat = None
 
+        if not ext_cat:
+            try:
+                from .datasources import get_datasources_path
+                data_dir = get_datasources_path().parent
+                if Path(data_dir).resolve() != Path("data").resolve():
+                    ext_cat = read_external_catalog(data_dir, matched_ext_ds.id)
+            except Exception:
+                pass
+
         if ext_cat and isinstance(ext_cat.get("tables"), list):
             cat_tables = ext_cat["tables"]
             if table_name:

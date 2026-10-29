@@ -78,7 +78,13 @@ def _load_catalog_for_datasource(datasource_id: str) -> dict | None:
             pass
     try:
         from db.external_catalog import read_external_catalog
-        return read_external_catalog(Path("data"), datasource_id)
+        res = read_external_catalog(Path("data"), datasource_id)
+        if res:
+            return res
+        from .datasources import get_datasources_path
+        data_dir = get_datasources_path().parent
+        if Path(data_dir).resolve() != Path("data").resolve():
+            return read_external_catalog(data_dir, datasource_id)
     except Exception:
         return None
 
