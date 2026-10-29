@@ -470,3 +470,12 @@ code { font-size: 13px; padding: 1px 5px; border-radius: 4px; background: var(--
   padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--bg); color: var(--text); font: inherit; font-size: 14px;
 }
+
+/* Шапка PDF-отчёта: рендерится вне экрана только на время снимка */
+.pdf-header {
+  position: fixed; left: -10000px; top: 0; padding: 4px 0 8px;
+  background: #ffffff; color: #18181b; font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+.pdf-header h1 { margin: 0 0 6px; font-size: 24px; }
+.pdf-header p { margin: 0 0 4px; font-size: 13px; color: #52525b; }
+.pdf-header .pdf-desc:empty { display: none; }

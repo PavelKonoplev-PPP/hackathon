@@ -8,6 +8,7 @@ import { deriveTable } from '../lib/chartViews.js'
 import { downloadXlsx } from '../lib/export.js'
 import { applyPeriod, isPeriodAware, periodBounds, usePeriod } from '../lib/period.js'
 import { go } from '../lib/router.js'
+import { downloadDashboardPdf } from '../lib/pdf.js'
 
 // Дашборд из нескольких виджетов (BI-13) с общим периодом (BI-34) и сохранением макета (BI-18).
 export default function DashboardPage({ id }) {
@@ -18,6 +19,7 @@ export default function DashboardPage({ id }) {
   const [editingTitle, setEditingTitle] = useState(false)
   const [dragId, setDragId] = useState(null)
   const [overId, setOverId] = useState(null)
+  const [pdfBusy, setPdfBusy] = useState(false)
   const [period, setPeriod] = usePeriod(id)
   const gridRef = useRef(null)
   const widgetsRef = useRef(widgets)
@@ -91,6 +93,22 @@ export default function DashboardPage({ id }) {
     downloadXlsx(sheets, dash.title)
   }
 
+  async function exportPdf() {
+    if (!gridRef.current) return notify('На дашборде нет виджетов для PDF')
+    setPdfBusy(true)
+    try {
+      const fmt = (iso) => iso.split('-').reverse().join('.')
+      const periodText = activePeriod
+        ? `${activePeriod.from ? fmt(activePeriod.from) : 'начало'} — ${activePeriod.to ? fmt(activePeriod.to) : 'конец'}`
+        : null
+      await downloadDashboardPdf({ grid: gridRef.current, title: dash.title, description: dash.description, period: periodText })
+    } catch (e) {
+      notify(`Не удалось собрать PDF: ${e.message}`)
+    } finally {
+      setPdfBusy(false)
+    }
+  }
+
   async function removeDashboard() {
     if (!window.confirm(`Удалить дашборд «${dash.title}»?`)) return
     try {
@@ -139,6 +157,9 @@ export default function DashboardPage({ id }) {
           </h2>
         )}
         <div className="page-actions">
+          <button className="ghost" onClick={exportPdf} disabled={pdfBusy || widgets.length === 0}>
+            {pdfBusy ? 'Готовлю PDF…' : 'Скачать PDF'}
+          </button>
           <button className="ghost" onClick={exportAll}>
             Скачать всё в Excel
           </button>
