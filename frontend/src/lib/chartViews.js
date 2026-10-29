@@ -62,3 +62,19 @@ export function pieProblem(chart) {
   if (chart.series[0].data.some((v) => typeof v === 'number' && v < 0)) return 'есть отрицательные значения'
   return null
 }
+
+// «график по выручке и график по прибыли», «два графика», «на отдельных графиках» → отдельные графики.
+// «на одном графике», «вместе» → один общий.
+const SPLIT_RE = /(график|диаграмм)\S*[^.?!]*\sи\s+(график|диаграмм)|(дв[аеу]х?|оба|обе)\s+(отдельн\S*\s+)?(график|диаграмм)|отдельн\S*\s+(график|диаграмм)|по\s+отдельности|раздельн/i
+const ONE_RE = /(на\s+одн\S*|общ\S*|совмещ\S*)\s+(график|диаграмм)|вместе/i
+
+export function detectSplitRequest(text = '') {
+  const t = String(text).toLowerCase()
+  if (ONE_RE.test(t)) return false
+  return SPLIT_RE.test(t)
+}
+
+// Каждая серия — отдельный график со своей шкалой и заголовком.
+export function splitChart(chart) {
+  return chart.series.map((s) => ({ ...chart, title: s.name, y_label: s.name, series: [s] }))
+}

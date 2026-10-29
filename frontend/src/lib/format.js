@@ -3,6 +3,7 @@
 // Не больше 3 знаков после запятой во всём интерфейсе.
 export const MAX_FRACTION = 3
 const nf = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: MAX_FRACTION })
+const nfMoney = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }) // ₽ — копейки, не больше
 const nf1 = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
 const monthFmt = new Intl.DateTimeFormat('ru-RU', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
@@ -30,7 +31,7 @@ export function unitOf(label = '') {
 export function formatValue(v, unit = '') {
   const n = toNumber(v)
   if (n === null) return v === null || v === undefined || v === '' ? '—' : String(v)
-  const s = nf.format(n)
+  const s = (unit === '₽' ? nfMoney : nf).format(n)
   return unit ? `${s} ${unit}` : s
 }
 
