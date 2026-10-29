@@ -47,7 +47,7 @@ function buildOption(spec, dark) {
     },
     yAxis: {
       type: 'value',
-      name: spec.y_label,
+      name: spec.y_label && spec.y_label !== spec.title ? spec.y_label : undefined, // без дубля заголовка
       splitLine: { lineStyle: { color: grid } },
       axisLabel: { color: text, formatter: formatCompact },
     },

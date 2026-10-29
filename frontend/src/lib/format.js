@@ -65,22 +65,35 @@ export function deriveKpis(table) {
   return nums.map((it) => ({ label: it.label, value: it.num, unit: unitOf(it.label), context }))
 }
 
-const DATE_RE = /^(\d{4})-(\d{2})(?:-(\d{2}))?(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/
+const ISO_RE = /^(\d{4})-(\d{2})(?:-(\d{2}))?(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/
+const RU_RE = /^(\d{2})\.(\d{2})\.(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/
 
-// Диапазон дат значения: «2024-10» → весь октябрь, «2024-10-05 12:00» → 5 октября.
-export function dateRange(v) {
+// Дата в одном из форматов бэкенда: ISO «2024-10-05[ 12:00[:00]]», «2024-10» или «05.10.2024[ 12:00]».
+function parseDate(v) {
   if (typeof v !== 'string') return null
-  const m = DATE_RE.exec(v.trim())
-  if (!m) return null
-  const y = Number(m[1])
-  const mo = Number(m[2])
-  if (mo < 1 || mo > 12) return null
-  if (m[3]) {
-    const d = `${m[1]}-${m[2]}-${m[3]}`
+  const t = v.trim()
+  let m = ISO_RE.exec(t)
+  let p = m && { y: m[1], mo: m[2], d: m[3] || null, h: m[4], mi: m[5], s: m[6] }
+  if (!p) {
+    m = RU_RE.exec(t)
+    p = m && { y: m[3], mo: m[2], d: m[1], h: m[4], mi: m[5], s: m[6] }
+  }
+  if (!p) return null
+  const mo = Number(p.mo)
+  if (mo < 1 || mo > 12 || (p.d && (Number(p.d) < 1 || Number(p.d) > 31))) return null
+  return p
+}
+
+// Диапазон дат значения: «2024-10» → весь октябрь, «2024-10-05 12:00» и «05.10.2024» → 5 октября.
+export function dateRange(v) {
+  const p = parseDate(v)
+  if (!p) return null
+  if (p.d) {
+    const d = `${p.y}-${p.mo}-${p.d}`
     return { start: d, end: d }
   }
-  const last = new Date(Date.UTC(y, mo, 0)).getUTCDate()
-  return { start: `${m[1]}-${m[2]}-01`, end: `${m[1]}-${m[2]}-${String(last).padStart(2, '0')}` }
+  const last = new Date(Date.UTC(Number(p.y), Number(p.mo), 0)).getUTCDate()
+  return { start: `${p.y}-${p.mo}-01`, end: `${p.y}-${p.mo}-${String(last).padStart(2, '0')}` }
 }
 
 export const isDateSeries = (values) => values.length > 0 && values.every((v) => dateRange(v) !== null)
@@ -88,13 +101,13 @@ export const isDateSeries = (values) => values.length > 0 && values.every((v) =>
 // Подписи категорий: месяцы → «окт. 2024», даты без времени → «05.10.2024».
 export function prettyCategories(categories) {
   if (!isDateSeries(categories)) return categories
-  const parsed = categories.map((c) => DATE_RE.exec(c.trim()))
-  const noTime = parsed.every((m) => !m[4] || (m[4] === '00' && m[5] === '00' && (!m[6] || m[6] === '00')))
+  const parsed = categories.map(parseDate)
+  const noTime = parsed.every((p) => !p.h || (p.h === '00' && p.mi === '00' && (!p.s || p.s === '00')))
   if (!noTime) return categories
-  const monthly = parsed.every((m) => !m[3] || m[3] === '01')
-  return parsed.map((m) => {
-    if (monthly) return monthFmt.format(new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, 1))).replace(/\s?г\.$/, '')
-    return `${m[3]}.${m[2]}.${m[1]}`
+  const monthly = parsed.every((p) => !p.d || p.d === '01')
+  return parsed.map((p) => {
+    if (monthly) return monthFmt.format(new Date(Date.UTC(Number(p.y), Number(p.mo) - 1, 1))).replace(/\s?г\.$/, '')
+    return `${p.d}.${p.mo}.${p.y}`
   })
 }
 

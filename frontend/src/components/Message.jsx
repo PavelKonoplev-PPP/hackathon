@@ -10,7 +10,7 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
   const steps = Array.isArray(msg.steps) ? msg.steps : []
   const isUser = msg.role === 'user'
   const hasResult = !msg.error && (msg.chart || msg.table)
-  const title = msg.chart?.title || question || 'Результат'
+  const title = question || msg.chart?.title || 'Результат'
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
