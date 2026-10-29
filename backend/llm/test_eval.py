@@ -157,11 +157,16 @@ class ApiRunTests(unittest.TestCase):
     @staticmethod
     def reply(message):
         if "погода" in message:
-            return {"answer": "Я отвечаю только на вопросы по данным."}
+            return {"answer": "Я отвечаю только на вопросы по данным.", "status": "refused"}
+        if "статус" in message:  # обычный ответ без таблицы — это не отказ
+            return {"answer": "Готово, изменил статус.", "status": "completed"}
+        if "без источника" in message:  # данные есть, а таблица-источник не указана
+            return {"answer": "Готово", "table": {"columns": ["Канал продажи", "Выручка"],
+                                                  "rows": [["Онлайн", "1 234 567,89"], ["Магазин", "100"]]}}
         if "без карты" in message:
             return {"answer": "Уточните", "clarification": {"question": "Что считать?",
                                                             "options": ["Строки", "Заказы"]}}
-        return {"answer": "Готово", "status": "completed",
+        return {"answer": "Готово", "status": "completed", "table_name": "data_01_Продажи",
                 "sql": "-- t = данные таблицы «Продажи» с приведёнными типами\nSELECT …",
                 "table": {"columns": ["Канал продажи", "Выручка"],
                           "rows": [["Онлайн", "1 234 567,89"], ["Магазин", "100"]]}}
@@ -189,7 +194,19 @@ class ApiRunTests(unittest.TestCase):
         self.CATALOG = {"tables": self.CATALOG["tables"] + [{"name": cases[3]["table"], "columns": []}]}
         report = self.run_cases(cases)
         self.assertEqual([r["ok"] for r in report], [True, True, True, False])
-        self.assertIn("не та таблица: Продажи", report[3]["reason"])
+        self.assertIn("не та таблица: data_01_Продажи", report[3]["reason"])
+
+    def test_false_positives_rejected(self):
+        """Ревью #88: ответ без таблицы — не отказ; данные без table_name — провал."""
+        cases = [
+            dict(id="r", table=None, mode="refuse", question="Поменяй статус всех заявок"),
+            dict(id="t", table="data_01_Продажи", mode="all", question="Выручка без источника",
+                 gold="SELECT 1"),
+        ]
+        report = self.run_cases(cases)
+        self.assertEqual([r["ok"] for r in report], [False, False])
+        self.assertEqual(report[0]["reason"], "агент не отказался")
+        self.assertIn("table_name", report[1]["reason"])
 
     def test_dialog_uses_one_session_and_sync_endpoint(self):
         case = dict(id="dlg", table="data_01_Продажи", mode="all", question="А за сентябрь?",

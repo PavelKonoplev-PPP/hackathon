@@ -467,6 +467,8 @@ class RefusalInfo:
             "table": None,
             "sql": None,
             "clarification": self.clarification,
+            # явный признак для API и тестов точности: отказ ≠ «просто ответ без таблицы»
+            "status": "clarification" if self.clarification else "refused",
         }
 
 
