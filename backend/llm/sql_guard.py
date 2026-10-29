@@ -117,6 +117,28 @@ def fix_column_case(sql: str, columns: list[str]) -> str:
 _QUOTED_OR_STRING = re.compile(r'("(?:[^"]|"")*"|\'(?:[^\']|\'\')*\')')
 
 
+def _mask_function_keywords(text: str) -> str:
+    """Mask 'FROM' keyword inside SQL functions like EXTRACT, SUBSTRING, TRIM so they
+    are not mistaken for table source clauses in SELECT ... FROM table."""
+    pattern = re.compile(r"\b(extract|substring|trim)\s*\(", re.IGNORECASE)
+    res = list(text)
+    for m in pattern.finditer(text):
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(text) and depth > 0:
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+            i += 1
+        end = i - 1 if depth == 0 else len(text)
+        fn_body = "".join(res[start:end])
+        fn_body_masked = re.sub(r"\bfrom\b", "    ", fn_body, flags=re.IGNORECASE)
+        res[start:end] = list(fn_body_masked)
+    return "".join(res)
+
+
 def quote_bare_columns(sql: str, columns: list[str]) -> str:
     """ID_Аптеки -> "ID_Аптеки": модель забывает кавычки у названий без пробелов,
     а PostgreSQL без кавычек приводит их к нижнему регистру и не находит."""
@@ -164,7 +186,8 @@ def validate_sql(sql: str, columns: list[str] | None = None,
     ctes = {m.lower() for m in re.findall(r"(?:\bwith|,)\s*([a-z_][a-z0-9_]*)\s+as\s*\(",
                                          masked, re.IGNORECASE)}
     allowed_sources = {table_alias, *ctes}
-    for source in re.findall(r"\b(?:from|join)\s+([^\s(),]+)", masked, re.IGNORECASE):
+    sources_masked = _mask_function_keywords(masked)
+    for source in re.findall(r"\b(?:from|join)\s+([^\s(),]+)", sources_masked, re.IGNORECASE):
         if source.lower() not in allowed_sources:
             shown = source
             m = re.fullmatch(r"__id(\d+)__", source)

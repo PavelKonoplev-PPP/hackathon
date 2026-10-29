@@ -28,12 +28,14 @@
 | **PDF Экспорт** | [BI-40] Issue #82 | Сервис `backend/app/services/pdf_export.py` и эндпоинты `GET /api/dashboards/{id}/pdf` и `POST /api/export/pdf`. Корпоративное оформление, кириллические шрифты (Arial/DejaVu), таблицы, графики, карточки KPI и SQL. |
 | **Регрессия** | Issue #81 | Сквозная интеграционная регрессия подтверждена. Все 199 бэкенд-тестов и 110 db-тестов зелёные. |
 | **CSV & Каталог** | [BI-08/10] Issue #91 | Разделены транзакция commit импорта CSV и read-only каталогизация через отдельное `get_reader_connection()`. Исключение в каталоге не откатывает готовую таблицу и возвращает честный `catalog_status: 'failed'`. Учтены `failed_audits` / `unverified_columns` (`catalog_status: 'partial'`). |
+| **Smart Compare** | [E2E/P0] Issue #97 | Защита от сравнения несовместимых величин (рубли с процентами): `are_compatible_metrics`, расчёт разницы долей в п.п. без бессмысленных процентов вида `+2,7 млрд %`. |
+| **Дефекты 1–5** | Дефекты 1–5 | Полностью устранены и протестированы все 5 дефектов из `docs/frontend-check.md`: автокаталог внешних БД (#79), возвраты в выручке, `EXTRACT` с `FROM` в `validate_sql`, восстановление усечённых алиасов > 63 байт, очистка ошибочного `, руб.` у оценок, синхронизация порядка сортировки ответа и таблицы. |
 
 ---
 
 ## 2. Результаты верификации тестов
 
-* **Backend**: **199 passed, 2 skipped, 0 failed** (`backend\.venv\Scripts\pytest backend`).
+* **Backend**: **244 passed, 2 skipped, 0 failed** (`backend\.venv\Scripts\pytest backend`).
 * **Database**: **110 passed, 0 failed** (`backend\.venv\Scripts\python -m unittest discover -s db -p "test_*.py"`).
 * **Golden Checks**: **25/25 OK, 0 ошибок** (`backend\.venv\Scripts\python db/run_golden_checks.py`).
 * **Frontend**: не изменялся (директория `frontend/` строго изолирована).

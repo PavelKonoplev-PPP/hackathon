@@ -102,6 +102,28 @@ class EnrichTests(unittest.TestCase):
         self.assertEqual(two_segment_difference(["Город", "Выручка"], [("Казань", 80), ("Москва", 100)]),
                          "«Москва» больше «Казань» на 20 (25,0%) по показателю «Выручка».")
 
+    def test_two_segments_prevents_comparing_rubles_with_percent_issue_97(self):
+        """Issue #97: Never compare rubles with percentage or emit +2.7 млрд %."""
+        # Row labels represent two completely different metrics with different units
+        res = two_segment_difference(["Метрика", "Значение"],
+                                     [("Выручка, руб.", 2684326520.31), ("Скидка, %", 5.0)])
+        self.assertEqual(res, "", "Different metrics (RUB and %) must NOT be compared!")
+
+    def test_two_segments_percentage_points_for_rate_metric(self):
+        """Issue #97: Difference between percentages is in percentage points (п.п.)."""
+        res = two_segment_difference(["Площадка", "CTR, %"], [("VK", 2.0), ("Яндекс", 3.5)])
+        self.assertIn("на +1,5 п.п.", res)
+        # Verify that relative percent like (+75,0%) was NOT appended
+        self.assertNotIn("(+", res)
+
+    def test_enrich_prevents_incompatible_fallback_issue_97(self):
+        """Issue #97: enrich_compare must NOT subtract percent from rubles when period labels missing."""
+        periods = parse_periods("сравни выручку и скидку")
+        # Columns have incompatible dimensions: Discount (%) and Revenue (RUB)
+        res = enrich_compare(["Город", "Скидка, %", "Выручка, руб."],
+                             [("Москва", 5.0, 2684326520.31)], periods)
+        self.assertIsNone(res, "Incompatible metrics must NOT be enriched with difference!")
+
 
 class FlowTests(unittest.TestCase):
     def setUp(self):

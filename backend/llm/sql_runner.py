@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 # Как в db/safe_cast.py: целевой тип PostgreSQL и регулярное выражение формата.
@@ -106,6 +107,75 @@ def _connection_key(conn) -> str:
     return f"conn-{id(conn)}"
 
 
+def extract_select_aliases(sql: str) -> list[str | None]:
+    """Extract top-level SELECT aliases from SQL to recover names if PostgreSQL
+    truncated them to 63 bytes (NAMEDATALEN limit)."""
+    m = re.search(r"\bselect\b", sql, re.IGNORECASE)
+    if not m:
+        return []
+    depth, quote, i = 0, None, m.end()
+    while i < len(sql):
+        ch = sql[i]
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and re.match(r"from\b", sql[i:i + 5], re.IGNORECASE) and not re.match(r"[\w]", sql[i - 1]):
+            break
+        i += 1
+    body = re.sub(r"^\s*distinct\b", "", sql[m.end():i], flags=re.IGNORECASE)
+    parts, current = [], []
+    d, q = 0, None
+    for ch in body:
+        if q:
+            if ch == q:
+                q = None
+        elif ch in "'\"":
+            q = ch
+        elif ch == "(":
+            d += 1
+        elif ch == ")":
+            d -= 1
+        elif ch == "," and d == 0:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current).strip())
+
+    aliases = []
+    for item in parts:
+        alias_match = re.search(r'\bas\s+(?:"([^"]+)"|([a-zA-Zа-яА-ЯёЁ_][a-zA-Zа-яА-ЯёЁ0-9_]*))\s*$', item, re.IGNORECASE)
+        if alias_match:
+            aliases.append(alias_match.group(1) or alias_match.group(2))
+        else:
+            aliases.append(None)
+    return aliases
+
+
+def restore_column_aliases(columns: list[str], model_sql: str) -> list[str]:
+    """Restore column names truncated by PostgreSQL identifier limit (63 bytes)."""
+    try:
+        orig_aliases = extract_select_aliases(model_sql)
+        if len(orig_aliases) != len(columns):
+            return columns
+        restored = []
+        for col, orig in zip(columns, orig_aliases):
+            if orig and col != orig:
+                trunc = orig.encode("utf-8")[:63].decode("utf-8", "ignore")
+                if col == trunc or (len(col.encode("utf-8")) >= 60 and orig.startswith(col)):
+                    restored.append(orig)
+                    continue
+            restored.append(col)
+        return restored
+    except Exception:
+        return columns
+
 @dataclass
 class PostgresRunner:
     """Выполняет запросы модели. Соединение (psycopg 3) создаёт backend.
@@ -159,6 +229,7 @@ class PostgresRunner:
     def run(self, table: dict, model_sql: str) -> QueryResult:
         query = build_query(self.schema, table, model_sql, self.max_rows + 1)
         columns, rows = self._fetch(query, self.max_rows + 1)
+        columns = restore_column_aliases(columns, model_sql)
         return QueryResult(columns, rows[:self.max_rows], truncated=len(rows) > self.max_rows)
 
     def category_values(self, table: dict, max_values: int = 15) -> dict[str, list[str]]:

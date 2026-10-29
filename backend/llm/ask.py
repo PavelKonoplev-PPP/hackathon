@@ -77,7 +77,7 @@ SQL_PROMPT = """Ты пишешь SQL для PostgreSQL 16. Все данные 
 - Доля в процентах: 100.0 * COUNT(*) FILTER (WHERE условие) / COUNT(*).
 - Сумма денег (выручка, оборот) = количество × цена за единицу; если есть скидка
   в процентах — умножай ещё на (1 - скидка / 100.0).
-- Давай результатам понятные русские имена: AS "Выручка, руб.".
+- Давай результатам понятные русские имена с правильными единицами: AS "Выручка, руб.", AS "Количество", AS "Средняя оценка" (оценки и баллы — без «руб.»!).
 - Ответь только SQL в блоке ```sql ... ```, без пояснений.
 {hint}
 Пример. Вопрос: «{example_q}»
@@ -473,14 +473,29 @@ def template_answer(columns: list[str], rows: list[tuple], truncated: bool) -> s
             return (f"{metric} за период с {format_value(ordered[0][0])} по "
                     f"{format_value(ordered[-1][0])}: максимум {format_value(peak[1])} "
                     f"({format_value(peak[0])}). Подробности — в таблице и на графике.")
-        ranked = sorted((r for r in rows if r[1] is not None), key=lambda r: r[1], reverse=True)
-        top = ranked[0]
-        text = (f"Наибольшее значение «{metric}» — у «{format_value(top[0])}»: "
-                f"{format_value(top[1])}.")
-        rest = ranked[1:3]
-        if rest:
-            text += " Далее: " + ", ".join(f"«{format_value(r[0])}» — {format_value(r[1])}"
-                                          for r in rest) + "."
+        valid_rows = [r for r in rows if r[1] is not None]
+        if not valid_rows:
+            return f"«{metric}»: нет данных."
+        # Если данные отсортированы по возрастанию, текст ответа следует порядку таблицы (дефект 5)
+        is_asc = len(valid_rows) >= 2 and valid_rows[0][1] < valid_rows[-1][1]
+        if is_asc:
+            ranked = sorted(valid_rows, key=lambda r: r[1])
+            top = ranked[0]
+            text = (f"Наименьшее значение «{metric}» — у «{format_value(top[0])}»: "
+                    f"{format_value(top[1])}.")
+            rest = ranked[1:3]
+            if rest:
+                text += " Далее: " + ", ".join(f"«{format_value(r[0])}» — {format_value(r[1])}"
+                                              for r in rest) + "."
+        else:
+            ranked = sorted(valid_rows, key=lambda r: r[1], reverse=True)
+            top = ranked[0]
+            text = (f"Наибольшее значение «{metric}» — у «{format_value(top[0])}»: "
+                    f"{format_value(top[1])}.")
+            rest = ranked[1:3]
+            if rest:
+                text += " Далее: " + ", ".join(f"«{format_value(r[0])}» — {format_value(r[1])}"
+                                              for r in rest) + "."
         if is_additive(metric) and not truncated:
             text += f" Всего: {format_value(sum(r[1] for r in ranked))}."
         return text
@@ -1081,9 +1096,14 @@ def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tupl
 
 
 def _format_change(column: str, value) -> str:
-    if column == "Изменение, %" and value is not None:
+    if value is None:
+        return "—"
+    if column.endswith("%") and isinstance(value, (int, float)):
         return f"{'+' if value > 0 else ''}{value:.1f}%".replace(".", ",")
-    if column == "Изменение" and value is not None and value > 0:
+    if "п.п." in column and isinstance(value, (int, float)):
+        diff_str = f"{'+' if value > 0 else ''}{value:.1f}".replace(".", ",")
+        return f"{diff_str} п.п."
+    if column.startswith("Изменение") and value is not None and value > 0:
         return "+" + format_value(value)
     return format_value(value)
 
@@ -1093,8 +1113,25 @@ def two_segment_difference(columns: list[str], rows: list[tuple]) -> str:
     if len(rows) != 2 or len(columns) != 2 or not all(_is_number(r[1]) for r in rows):
         return ""
     (a, x), (b, y) = sorted(rows, key=lambda r: r[1], reverse=True)
-    diff = float(x) - float(y)
-    pct = f" ({diff / float(y) * 100:.1f}%)".replace(".", ",") if y else ""
+    val_x, val_y = float(x), float(y)
+    str_a, str_b = str(a).strip(), str(b).strip()
+    metric_col = columns[1]
+
+    # Защита от сравнения несовместимых величин (рубли с процентами, Issue #97)
+    if not cmp.are_compatible_metrics(str_a, str_b):
+        return ""
+
+    diff = val_x - val_y
+    is_pct = cmp.is_percent_metric(metric_col) or cmp.is_percent_metric(str_a) or cmp.is_percent_metric(str_b)
+    if is_pct:
+        diff_str = f"{diff:+.1f}".replace(".", ",")
+        return f"«{format_value(a)}» больше «{format_value(b)}» на {diff_str} п.п. по показателю «{columns[1]}»."
+
+    # Защита от деления на околоноль и бессмысленных процентов вида +2,7 млрд %
+    if val_y > 1e-6 and abs(diff / val_y * 100) <= 10000:
+        pct = f" ({diff / val_y * 100:.1f}%)".replace(".", ",")
+    else:
+        pct = ""
     return (f"«{format_value(a)}» больше «{format_value(b)}» на {format_value(diff)}{pct} "
             f"по показателю «{columns[1]}».")
 

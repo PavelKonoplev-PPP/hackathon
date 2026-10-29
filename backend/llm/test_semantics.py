@@ -51,6 +51,15 @@ class ViewTests(unittest.TestCase):
 
 
 class AdjustTests(unittest.TestCase):
+    def test_adjust_sql_strips_rub_from_rating_and_count_aliases_defect_4(self):
+        intent = Intent.parse("какая средняя оценка")
+        sql = 'SELECT AVG("Оценка") AS "Средняя оценка, руб." FROM t'
+        adj = adjust_sql(sql, intent)
+        self.assertEqual(adj, 'SELECT AVG("Оценка") AS "Средняя оценка" FROM t')
+
+        sql2 = 'SELECT COUNT(*) AS "Количество, руб." FROM t'
+        adj2 = adjust_sql(sql2, intent)
+        self.assertEqual(adj2, 'SELECT COUNT(*) AS "Количество" FROM t')
     def test_limit_removed_without_top(self):
         sql = 'SELECT "Месяц", COUNT(*) FROM t GROUP BY 1 ORDER BY 2 DESC LIMIT 10'
         self.assertNotIn("LIMIT", adjust_sql(sql, Intent.parse("Сколько продаж по месяцам?")))

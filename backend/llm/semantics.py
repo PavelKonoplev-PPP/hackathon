@@ -155,8 +155,26 @@ _FILTER = re.compile(
     re.IGNORECASE)
 
 
+
+
+def fix_misleading_money_alias(sql: str) -> str:
+    """Strip accidental ', руб.' from aliases of non-monetary metrics (ratings, scores, counts)."""
+    def repl(m):
+        full = m.group(0)
+        alias = m.group(1)
+        low = alias.lower()
+        non_money_words = ("оценк", "балл", "рейтинг", "количеств", "число", "штук", "длительност", "время")
+        if any(w in low for w in non_money_words) and any(s in low for s in (", руб", "(руб")):
+            cleaned = alias
+            for s in (", руб.", ", руб", " (руб.)", " (руб)"):
+                cleaned = re.sub(re.escape(s), "", cleaned, flags=re.IGNORECASE).strip()
+            return f'AS "{cleaned}"'
+        return full
+
+    return re.sub(r'\bAS\s+"([^"]+)"', repl, sql, flags=re.IGNORECASE)
 def adjust_sql(sql: str, intent: Intent) -> str:
     """Автоисправления, на которые не стоит тратить попытку модели."""
+    sql = fix_misleading_money_alias(sql)
     has_group = re.search(r"\bgroup\s+by\b", sql, re.IGNORECASE)
     m = _TRAILING_LIMIT.search(sql)
     if intent.wants_top:

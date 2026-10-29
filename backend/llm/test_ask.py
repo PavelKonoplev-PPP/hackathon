@@ -51,6 +51,12 @@ class GuardTests(unittest.TestCase):
         self.bad("SELECT pg_read_file('/etc/passwd')", "Служебные")
         self.bad("SELECT set_config('x', 'y', false) FROM t", "Служебные")
 
+    def test_extract_function_with_from_allowed(self):
+        # Defect 3: EXTRACT/SUBSTRING with FROM must not be rejected as foreign table
+        self.ok('SELECT * FROM t WHERE EXTRACT(YEAR FROM "Дата") = 2025')
+        self.ok('SELECT EXTRACT(EPOCH FROM ("Дата" - "Дата")) / 3600 FROM t')
+        self.ok('SELECT SUBSTRING("Канал продажи" FROM 1 FOR 3) FROM t')
+
     def test_unknown_column_hint(self):
         self.bad('SELECT "Выручка" FROM t', 'Колонки "Выручка" нет')
         self.bad('SELECT "Выручка" FROM t', '"Цена, руб."')
@@ -66,6 +72,13 @@ class GuardTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_restore_column_aliases_issue_defect_4(self):
+        from backend.llm.sql_runner import restore_column_aliases
+        sql = 'SELECT COUNT(*) AS "Количество продаж без карты лояльности", "Канал" AS "Канал продажи" FROM t'
+        cols = ["Количество продаж без карты лояль", "Канал продажи"]
+        restored = restore_column_aliases(cols, sql)
+        self.assertEqual(restored, ["Количество продаж без карты лояльности", "Канал продажи"])
+
     def test_caches_are_per_datasource(self):
         """Две внешние базы с одинаковой public.sales не делят значения категорий."""
         from backend.llm import sql_runner as sr
@@ -123,6 +136,13 @@ class AnswerQualityTests(unittest.TestCase):
         avg = template_answer(["Канал", "Средняя оценка"], [("Телефон", Decimal("3.94")),
                                                             ("Чат", Decimal("3.87"))], False)
         self.assertNotIn("Всего", avg)
+
+    def test_template_preserves_ascending_order(self):
+        # Defect 5: When rows are sorted ascending, template follows table order
+        rows = [("Казань", Decimal("100000")), ("Москва", Decimal("250000"))]
+        res = template_answer(["Город", "Выручка, руб."], rows, False)
+        self.assertIn("Наименьшее значение «Выручка, руб.» — у «Казань»: 100 000", res)
+        self.assertIn("Далее: «Москва» — 250 000", res)
 
     def test_missing_note(self):
         table = {"columns": [{"name": "Оценка клиента", "conversion": {"quality": {

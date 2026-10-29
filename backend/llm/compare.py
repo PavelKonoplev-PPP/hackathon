@@ -174,6 +174,33 @@ def choose_date_column(table: dict, question: str, kinds: dict[str, str]) -> str
 
 # ---------- результат сравнения ----------
 
+def is_percent_metric(name: str) -> bool:
+    """Check if the column or metric is measured in percent (%, CTR, discount, share)."""
+    low = name.lower()
+    return "%" in name or any(w in low for w in ("процент", "доля", "ctr", "скидк", "конверси", "ставка"))
+
+
+def is_money_metric(name: str) -> bool:
+    """Check if the column or metric is monetary (RUB, price, revenue, spend)."""
+    low = name.lower()
+    return any(w in low for w in ("руб", "₽", "выручк", "цена", "расход", "бюджет", "сумм", "стоимост", "доход"))
+
+
+def are_compatible_metrics(name_a: str, name_b: str) -> bool:
+    """Validate that two columns or labels have compatible units and can be compared.
+
+    Prevents comparing percentages with rubles or other unit mismatches (issue #97).
+    """
+    str_a, str_b = str(name_a).strip(), str(name_b).strip()
+    pct_a, pct_b = is_percent_metric(str_a), is_percent_metric(str_b)
+    if pct_a != pct_b:
+        return False
+    money_a, money_b = is_money_metric(str_a), is_money_metric(str_b)
+    if money_a != money_b:
+        return False
+    return True
+
+
 def _num(v) -> float | None:
     if isinstance(v, bool) or v is None:
         return None
@@ -191,15 +218,24 @@ def enrich_compare(columns: list[str], rows: list[tuple], periods: list[Period])
                    if rows and all(_num(r[i]) is not None or r[i] is None for r in rows)]
         if len(numeric) < 2:
             return None
-        idx = numeric[-2:]
+        candidate = numeric[-2:]
+        if not are_compatible_metrics(columns[candidate[0]], columns[candidate[1]]):
+            return None
+        idx = candidate
     a, b = idx
+    is_pct = is_percent_metric(columns[a]) or is_percent_metric(columns[b])
     out_rows = []
     for r in rows:
         x, y = _num(r[a]), _num(r[b])
         delta = None if x is None or y is None else y - x
-        pct = None if delta is None or not x else delta / abs(x) * 100
-        out_rows.append(tuple(r) + (delta, pct))
-    out_cols = list(columns) + ["Изменение", "Изменение, %"]
+        if is_pct:
+            # Разница двух процентов измеряется строго в п.п., относительный % от % не вычисляется (#97)
+            out_rows.append(tuple(r) + (delta, None))
+        else:
+            pct = None if delta is None or not x else delta / abs(x) * 100
+            out_rows.append(tuple(r) + (delta, pct))
+    change_col = "Изменение, п.п." if is_pct else "Изменение"
+    out_cols = list(columns) + [change_col, "Изменение, %"]
     return out_cols, out_rows, (a, b)
 
 
@@ -208,6 +244,7 @@ def compare_summary(columns: list[str], rows: list[tuple], pair: tuple[int, int]
     """Текст вывода: одна строка — итог; несколько — лидеры роста и падения."""
     a, b = pair
     first, second = columns[a], columns[b]
+    is_pct = is_percent_metric(first) or is_percent_metric(second)
     labels = [i for i in range(len(columns) - 2) if i not in pair and _num(rows[0][i]) is None]
 
     def change(r):
@@ -216,6 +253,9 @@ def compare_summary(columns: list[str], rows: list[tuple], pair: tuple[int, int]
             return "нет данных для сравнения"
         sign = "+" if delta > 0 else ""
         word = "рост" if delta > 0 else ("снижение" if delta < 0 else "без изменений")
+        if is_pct:
+            diff_str = f"{sign}{delta:.1f}".replace(".", ",")
+            return f"{word}: {diff_str} п.п."
         pct_txt = f", {sign}{pct:.1f}%".replace(".", ",") if pct is not None else ""
         return f"{word}: {sign}{fmt(delta)}{pct_txt}"
 
@@ -226,12 +266,12 @@ def compare_summary(columns: list[str], rows: list[tuple], pair: tuple[int, int]
     valid = [r for r in rows if r[-2] is not None]
     if not valid:
         return "Для сравнения не хватает данных за один из периодов."
-    up = max(valid, key=lambda r: r[-1] if r[-1] is not None else r[-2])
-    down = min(valid, key=lambda r: r[-1] if r[-1] is not None else r[-2])
+    up = max(valid, key=lambda r: r[-2] if is_pct else (r[-1] if r[-1] is not None else r[-2]))
+    down = min(valid, key=lambda r: r[-2] if is_pct else (r[-1] if r[-1] is not None else r[-2]))
     total_a = sum(_num(r[a]) or 0 for r in rows)
     total_b = sum(_num(r[b]) or 0 for r in rows)
     total_delta = total_b - total_a
-    total_pct = total_delta / abs(total_a) * 100 if total_a else None
+    total_pct = (total_delta / abs(total_a) * 100 if total_a else None) if not is_pct else None
     total = change((None,) * 0 + (total_delta, total_pct))
     text = (f"{second} к {first} в целом — {total}. "
             f"Сильнее всего выросло «{fmt(up[name])}» ({change(up)})")
