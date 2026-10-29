@@ -23,12 +23,86 @@ from ..api.schemas import (
 )
 try:
     from backend.llm.sql_guard import SQLRejected, validate_sql
+    from backend.llm.sql_runner import PostgresRunner
+    from backend.llm.catalog_summary import match_table_name, display_table_name
 except ImportError:
     from llm.sql_guard import SQLRejected, validate_sql
+    from llm.sql_runner import PostgresRunner  # type: ignore
+    from llm.catalog_summary import match_table_name, display_table_name  # type: ignore
 
 from ..config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# Pattern: SQL written for the agent's CTE alias «t» (FROM t / JOIN t / -- t = …)
+_AGENT_CTE_RE = re.compile(
+    r'(?:^|\n)\s*--\s*t\s*='       # comment header line
+    r'|\bfrom\s+t\b'               # FROM t
+    r'|\bjoin\s+t\b',              # JOIN t
+    re.IGNORECASE | re.MULTILINE,
+)
+# Extract table name from comment: -- t = данные таблицы «Name» с …
+_TABLE_NAME_RE = re.compile(
+    r'\u00ab(.+?)\u00bb'           # «…»
+    r'|"(.+?)"'                    # "…"
+    r"|'(.+?)'"                    # '…'
+)
+
+
+def _extract_table_from_comment(sql: str) -> str | None:
+    """Parse the agent's SQL comment header to extract the source table name."""
+    first_line_m = re.match(r'^--[^\n]*', sql)
+    if not first_line_m:
+        return None
+    m = _TABLE_NAME_RE.search(first_line_m.group(0))
+    if not m:
+        return None
+    return next((g for g in m.groups() if g), None)
+
+
+def _load_catalog_for_datasource(datasource_id: str) -> dict | None:
+    """Load schema catalog for a datasource (raw or external)."""
+    if not datasource_id or datasource_id.lower() == "raw":
+        try:
+            from .agent import load_catalogs
+            cat, _ = load_catalogs()
+            return cat
+        except Exception:
+            return None
+    # External datasource
+    ext_path = Path("data/external-catalogs") / datasource_id / "schema-catalog.json"
+    if ext_path.is_file():
+        try:
+            return json.loads(ext_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    try:
+        from db.external_catalog import read_external_catalog
+        return read_external_catalog(Path("data"), datasource_id)
+    except Exception:
+        return None
+
+
+def _build_chart(
+    cols: list[str],
+    formatted_rows: list[list[Any]],
+    chart_config: dict | None,
+    title: str,
+) -> ChartSpec | None:
+    if not chart_config:
+        return None
+    chart_type = chart_config.get("type", "bar")
+    x_idx, y_idx = 0, (1 if len(cols) > 1 else 0)
+    categories = [str(r[x_idx]) for r in formatted_rows[:20]]
+    series_vals = [r[y_idx] if len(r) > y_idx else 0 for r in formatted_rows[:20]]
+    return ChartSpec(
+        type=chart_type if chart_type in ("bar", "line", "pie") else "bar",
+        title=title,
+        x_label=cols[x_idx] if cols else None,
+        y_label=cols[y_idx] if len(cols) > 1 else None,
+        categories=categories,
+        series=[ChartSeries(name=cols[y_idx] if len(cols) > 1 else "Значение", data=series_vals)],
+    )
 
 
 def get_saved_queries_path() -> Path:
@@ -210,10 +284,16 @@ def delete_saved_query(query_id: str) -> bool:
 
 
 def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
-    """Execute a saved analytical query by ID.
+    """Execute a saved analytical query by ID (BI-35 / Issue #85 / Issue #80).
 
-    If SQL query is preserved, runs SQL directly on the designated datasource.
-    Otherwise delegates to the analytical chat agent.
+    SQL execution strategy:
+    - If sql contains the agent's CTE alias ``t`` (written by PostgresRunner), we
+      re-execute through PostgresRunner so type-casting and read-only mode are applied
+      correctly — this fixes the ``relation "t" does not exist`` crash.
+    - Plain SQL (referencing real schema tables) runs directly in a read-only
+      transaction with a row limit and statement timeout (BI-35 security hardening).
+    - If no sql is stored (frontend workaround for agent SQL), we replay the natural-
+      language question through the agent.
     """
     query = get_saved_query_by_id(query_id)
     if not query:
@@ -221,9 +301,9 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
 
     start_time = time.perf_counter()
 
-    # 1. Direct SQL execution path
+    # ── 1. SQL execution path ────────────────────────────────────────────────
     if query.sql:
-        # BI-35: Security hardening
+        # Security guard: reject DDL/DML and multi-statement queries (BI-35 / #80)
         try:
             validate_sql(query.sql)
         except SQLRejected as exc:
@@ -240,52 +320,72 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
             conn = get_reader_connection()
 
         try:
-            with conn.cursor() as cur:
-                cur.execute(query.sql)
-                cols = [desc[0] for desc in cur.description] if cur.description else []
-                raw_rows = cur.fetchall() if cur.description else []
+            uses_cte_t = bool(_AGENT_CTE_RE.search(query.sql))
+            resolved_table_name: str | None = query.table_name
 
-            # Format rows
-            formatted_rows: list[list[Any]] = []
-            for row in raw_rows:
-                formatted_rows.append([
-                    str(v) if not isinstance(v, (int, float, bool, type(None))) else v
-                    for v in row
-                ])
+            if uses_cte_t:
+                # --- Agent SQL path: re-run via PostgresRunner ---
+                # 1. Determine source table name
+                if not resolved_table_name:
+                    resolved_table_name = _extract_table_from_comment(query.sql)
+
+                # 2. Load catalog to get column metadata for type-safe CTE
+                cat = _load_catalog_for_datasource(query.datasource_id)
+                target_table: dict | None = None
+                if cat and isinstance(cat.get("tables"), list):
+                    tables: list[dict] = cat["tables"]
+                    if resolved_table_name:
+                        for t in tables:
+                            if isinstance(t, dict) and match_table_name(t, resolved_table_name):
+                                target_table = t
+                                resolved_table_name = t.get("name")
+                                break
+                    # Single-table datasource: use it even without explicit table_name
+                    if target_table is None and len(tables) == 1:
+                        target_table = tables[0]
+                        resolved_table_name = target_table.get("name")
+
+                if target_table is None:
+                    raise ValueError(
+                        f"Запрос обращается к представлению 't', но таблица "
+                        f"'{resolved_table_name or 'не указана'}' не найдена "
+                        f"в каталоге источника '{query.datasource_id}'. "
+                        f"Сохраните запрос заново — фронтенд передаст table_name."
+                    )
+
+                # 3. Strip the comment header, then run via PostgresRunner
+                clean_sql = re.sub(r'(?m)^\s*--[^\n]*\n?', '', query.sql, count=1).strip()
+                runner = PostgresRunner(conn, schema=ext_schema, max_rows=500)
+                run_res = runner.run(target_table, clean_sql)
+                cols: list[str] = run_res.columns
+                raw_rows: list = list(run_res.rows)
+
+            else:
+                # --- Plain SQL path: read-only transaction with limits (#80) ---
+                with conn.transaction():
+                    cur = conn.cursor()
+                    cur.execute("SET TRANSACTION READ ONLY")
+                    cur.execute("SET LOCAL statement_timeout = 20000")
+                    cur.execute(query.sql)
+                    cols = [desc.name for desc in cur.description] if cur.description else []
+                    raw_rows = list(cur.fetchmany(500)) if cur.description else []
+                    resolved_table_name = resolved_table_name or query.table_name
+
+            # Format rows (all values to JSON-safe types)
+            formatted_rows: list[list[Any]] = [
+                [str(v) if not isinstance(v, (int, float, bool, type(None))) else v for v in row]
+                for row in raw_rows
+            ]
 
             table_spec = TableSpec(columns=cols, rows=formatted_rows)
-            chart_spec = None
-
-            # Build default chart if applicable
-            if query.chart_config:
-                chart_type = query.chart_config.get("type", "bar")
-                x_idx = 0
-                y_idx = 1 if len(cols) > 1 else 0
-                categories = [str(r[x_idx]) for r in formatted_rows[:20]]
-                series_vals = [r[y_idx] if len(r) > y_idx else 0 for r in formatted_rows[:20]]
-                chart_spec = ChartSpec(
-                    type=chart_type if chart_type in ("bar", "line", "pie") else "bar",
-                    title=query.title,
-                    x_label=cols[x_idx] if cols else None,
-                    y_label=cols[y_idx] if len(cols) > 1 else None,
-                    categories=categories,
-                    series=[ChartSeries(name=cols[y_idx] if len(cols) > 1 else "Значение", data=series_vals)],
-                )
+            chart_spec = _build_chart(cols, formatted_rows, query.chart_config, query.title)
 
             duration = round((time.perf_counter() - start_time) * 1000, 2)
             steps = [
-                ExecutionStep(
-                    step="load_query",
-                    title="Загрузка сохранённого запроса",
-                    status="completed",
-                    duration_ms=round(duration * 0.1, 2),
-                ),
-                ExecutionStep(
-                    step="execute_sql",
-                    title="Выполнение SQL запроса",
-                    status="completed",
-                    duration_ms=round(duration * 0.9, 2),
-                ),
+                ExecutionStep(step="load_query", title="Загрузка сохранённого запроса",
+                              status="completed", duration_ms=round(duration * 0.1, 2)),
+                ExecutionStep(step="execute_sql", title="Выполнение SQL",
+                              status="completed", duration_ms=round(duration * 0.9, 2)),
             ]
 
             return SavedQueryExecuteResponse(
@@ -295,10 +395,11 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
                 status="completed",
                 execution_time_ms=duration,
                 result=ChatResponse(
-                    answer=f"Запрос «{query.title}» успешно выполнен. Получено строк: {len(formatted_rows)}.",
+                    answer=f"Запрос «{query.title}» выполнен. Получено строк: {len(formatted_rows)}.",
                     table=table_spec,
                     chart=chart_spec,
                     sql=query.sql,
+                    table_name=resolved_table_name,
                     status="completed",
                     steps=steps,
                     execution_time_ms=duration,
@@ -311,7 +412,7 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
                 except Exception:
                     pass
 
-    # 2. Natural language question re-execution path
+    # ── 2. Natural-language replay path ─────────────────────────────────────
     elif query.question:
         from .agent import process_chat_message
 
@@ -331,6 +432,7 @@ def execute_saved_query(query_id: str) -> SavedQueryExecuteResponse:
             result=chat_resp,
         )
 
+    # ── 3. Empty query ───────────────────────────────────────────────────────
     else:
         duration = round((time.perf_counter() - start_time) * 1000, 2)
         return SavedQueryExecuteResponse(

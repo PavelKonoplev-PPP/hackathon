@@ -859,6 +859,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                           "rows": [[_format_change(c, v) for c, v in zip(columns, row)] for row in rows]},
                 "sql": shown_sql,
                 "chart": cmp.compare_chart(columns, rows, pair, format_value),
+                "table_name": table["name"],
             }
             return response
 
@@ -1062,6 +1063,7 @@ def _result_response(result, sql: str, table: dict, view: str | None, question: 
         "table": {"columns": result.columns,
                   "rows": [[format_value(v) for v in row] for row in result.rows]},
         "sql": f"-- t = данные таблицы «{table_name}» с приведёнными типами\n{sql}",
+        "table_name": table["name"],
     }
     chart, note = suggest_chart(result.columns, result.rows, view, question)
     if chart:
