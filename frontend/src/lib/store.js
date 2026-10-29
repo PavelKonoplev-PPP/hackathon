@@ -201,6 +201,7 @@ export function useConversations({ onDashboardCreated } = {}) {
     sql: reply.sql,
     clarification: reply.clarification,
     status: reply.status,
+    tableName: reply.table_name || null,
     steps: reply.steps,
     executionMs: reply.execution_time_ms,
     ...extra,

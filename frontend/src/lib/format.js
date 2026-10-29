@@ -17,6 +17,7 @@ export function toNumber(v) {
 export function unitOf(label = '') {
   const l = String(label).toLowerCase()
   if (/млн|млрд|тыс/.test(l)) return '' // масштаб уже в подписи — не дописываем единицу к числу
+  if (/оценк|рейтинг|балл|nps/.test(l)) return '' // оценки и баллы — не деньги, даже если модель дописала «руб.»
   if (/руб|₽|выручк|расход|стоимост|оборот/.test(l)) return '₽'
   if (/%|процент/.test(l)) return '%'
   if (/шт/.test(l)) return 'шт.'
