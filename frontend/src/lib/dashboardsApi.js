@@ -1,7 +1,7 @@
 // Дашборды: сервер /api/dashboards (BI-15) или локальное хранилище в демо-режиме.
 import { isMock, request } from './api.js'
 import { deriveKpis } from './format.js'
-import { detectViewRequest } from './chartViews.js'
+import { detectSplitRequest, detectViewRequest, splitChart } from './chartViews.js'
 
 const LOCAL_KEY = 'bi-dashboards-local-v1'
 
@@ -77,7 +77,7 @@ export const dashboardsApi = isMock ? local : remote
 export const shortId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8)
 
 // Виджет из ответа агента. Вид графика и размер храним в grid (бэкенд сохраняет его как есть).
-export function widgetFromResult({ title, text, chart, table, sql, view }) {
+export function widgetFromResult({ title, text, chart, table, sql, view, split }) {
   const kpis = !chart && deriveKpis(table)
   return {
     id: shortId(),
@@ -87,7 +87,7 @@ export function widgetFromResult({ title, text, chart, table, sql, view }) {
     chart: chart || null,
     table: table || null,
     answer: text || null,
-    grid: { w: 6, h: kpis ? 1 : 2, view: view || null },
+    grid: { w: 6, h: kpis ? 1 : 2, view: view || null, ...(split ? { split: true } : {}) },
   }
 }
 
@@ -100,13 +100,32 @@ export function questionFor(messages, index) {
   return null
 }
 
+// Весь текст запроса к ответу: вопрос и уточнения после него («Выведи график X и график Y» → «Продажи»).
+// Идём назад до предыдущего ответа с результатом.
+export function askedTextFor(messages, index) {
+  const parts = []
+  for (let i = index - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'assistant' && (m.chart || m.table)) break
+    if (m.role === 'user' && !detectViewRequest(m.text)) parts.unshift(m.text)
+  }
+  return parts.join(' ')
+}
+
 // Результаты диалога: ответы с графиком или таблицей. Заголовок — вопрос пользователя:
 // заголовок графика от бэкенда часто совпадает с подписью оси («Выручка, руб.»).
 export function resultsFromMessages(messages) {
   const out = []
   messages.forEach((m, i) => {
     if (m.role !== 'assistant' || m.error || !(m.chart || m.table)) return
-    out.push({ ...m, title: questionFor(messages, i) || m.chart?.title })
+    const question = questionFor(messages, i)
+    const split = m.split ?? detectSplitRequest(askedTextFor(messages, i))
+    // Отдельные графики (#103) — отдельными виджетами, каждый со своей шкалой.
+    if (split && m.chart?.series?.length > 1) {
+      splitChart(m.chart).forEach((part) => out.push({ ...m, chart: part, table: null, title: part.title }))
+      return
+    }
+    out.push({ ...m, title: question || m.chart?.title })
   })
   return out
 }

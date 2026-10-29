@@ -1,12 +1,13 @@
 // Экспорт: таблицы в Excel (XLSX), графики в PNG.
 import { strToU8, zipSync } from 'fflate'
+import { toNumber, unitOf } from './format.js'
 
 const XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 const NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 const NS_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 const NS_PKG_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
-const STYLES = `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
+const STYLES = `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
 
 const esc = (s) =>
   String(s)
@@ -24,15 +25,23 @@ function colName(i) {
   return s
 }
 
-function cellXml(v, ref, bold) {
+// Числа, которые бэкенд прислал строкой («1 150 771 281,54», «3.2845»), пишем числами — по ним можно
+// считать в Excel. Целые строки без разделителей (коды, «001») оставляем текстом.
+const NUMERIC_STR = /^-?\d{1,3}(?:[\s\u00a0]\d{3})+(?:[.,]\d+)?$|^-?\d+[.,]\d+$/
+const excelValue = (v) => (typeof v === 'string' && NUMERIC_STR.test(v.trim()) ? toNumber(v) : v)
+
+// style: 1 — жирный заголовок, 2 — деньги «# ##0,00»
+function cellXml(raw, ref, style) {
+  const v = excelValue(raw)
   if (v === null || v === undefined || v === '') return ''
-  const s = bold ? ' s="1"' : ''
-  if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"${s}><v>${v}</v></c>`
+  if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"${style === 2 ? ' s="2"' : ''}><v>${v}</v></c>`
+  const s = style === 1 ? ' s="1"' : ''
   return `<c r="${ref}" t="inlineStr"${s}><is><t xml:space="preserve">${esc(v)}</t></is></c>`
 }
 
 function sheetXml(table) {
   const rows = [table.columns, ...table.rows]
+  const moneyCols = table.columns.map((c) => unitOf(c) === '₽')
   const cols = table.columns
     .map((c, i) => {
       const longest = Math.max(String(c).length, ...table.rows.slice(0, 200).map((r) => String(r[i] ?? '').length))
@@ -40,7 +49,7 @@ function sheetXml(table) {
     })
     .join('')
   const body = rows
-    .map((row, r) => `<row r="${r + 1}">${row.map((v, c) => cellXml(v, colName(c) + (r + 1), r === 0)).join('')}</row>`)
+    .map((row, r) => `<row r="${r + 1}">${row.map((v, c) => cellXml(v, colName(c) + (r + 1), r === 0 ? 1 : moneyCols[c] ? 2 : 0)).join('')}</row>`)
     .join('')
   return `${XML_HEAD}<worksheet xmlns="${NS_MAIN}"><cols>${cols}</cols><sheetData>${body}</sheetData></worksheet>`
 }

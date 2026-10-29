@@ -3,14 +3,17 @@ import ResultView from './ResultView.jsx'
 import AddToDashboard from './AddToDashboard.jsx'
 import SaveQueryButton from './SaveQueryButton.jsx'
 import StepsView, { formatMs } from './StepsView.jsx'
+import { detectSplitRequest } from '../lib/chartViews.js'
 
-export default function Message({ msg, question, datasourceId, tableName, onPickOption, onChangeView }) {
+export default function Message({ msg, question, askedText = '', datasourceId, tableName, onPickOption, onChangeView, onPatch }) {
   const [showSql, setShowSql] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = Array.isArray(msg.steps) ? msg.steps : []
   const isUser = msg.role === 'user'
   const hasResult = !msg.error && (msg.chart || msg.table)
   const title = question || msg.chart?.title || 'Результат'
+  // Отдельные графики: выбор пользователя, иначе — по формулировке вопроса («график X и график Y»).
+  const split = msg.split ?? detectSplitRequest(askedText || question)
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
@@ -23,6 +26,11 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
             table={msg.table}
             view={msg.view}
             onChangeView={(v) => onChangeView(msg.id, v)}
+            split={split}
+            onToggleSplit={onPatch ? () => onPatch(msg.id, { split: !split }) : undefined}
+            extraFor={(part) => (
+              <AddToDashboard result={{ title: part.title, text: msg.text, chart: part, table: null, sql: msg.sql, view: msg.view, datasourceId }} />
+            )}
             title={title}
             extraTable
           />
@@ -55,7 +63,7 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
               </button>
             )}
             {hasResult && (
-              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, datasourceId }} />
+              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, split, datasourceId }} />
             )}
             {hasResult && msg.sql && (
               <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName: msg.tableName || tableName }} />

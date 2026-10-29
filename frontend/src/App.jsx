@@ -92,6 +92,7 @@ export default function App() {
     rename,
     buildDashboard,
     setDatasource,
+    patchMessage,
     startConversation,
     clearTable,
     runSavedQuery,
@@ -219,6 +220,7 @@ export default function App() {
                 progress={progress[active.id]}
                 onSend={send}
                 onChangeView={setView}
+                onPatchMessage={patchMessage}
                 onBuildDashboard={onBuildDashboard}
                 onChangeDatasource={onChangeDatasource}
                 onClearTable={clearTable}
