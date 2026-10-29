@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react'
 import Message from './Message.jsx'
 import { AppContext } from '../lib/appContext.js'
-import { questionFor } from '../lib/dashboardsApi.js'
+import { askedTextFor, questionFor } from '../lib/dashboardsApi.js'
 
 const SUGGESTIONS = [
   'Опиши данные',
@@ -9,7 +9,7 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-export default function Chat({ conversation, loading, progress, onSend, onChangeView, onBuildDashboard, onChangeDatasource, onClearTable }) {
+export default function Chat({ conversation, loading, progress, onSend, onChangeView, onPatchMessage, onBuildDashboard, onChangeDatasource, onClearTable }) {
   const { datasources } = useContext(AppContext)
   const [input, setInput] = useState('')
   const [building, setBuilding] = useState(false)
@@ -109,10 +109,12 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
               key={m.id}
               msg={m}
               question={question}
+              askedText={m.role === 'assistant' ? askedTextFor(conversation.messages, i) : ''}
               datasourceId={conversation.datasourceId}
               tableName={conversation.tableName}
               onPickOption={send}
               onChangeView={(msgId, view) => onChangeView(conversation.id, msgId, view)}
+              onPatch={onPatchMessage ? (msgId, patch) => onPatchMessage(conversation.id, msgId, patch) : undefined}
             />
           )
         })}

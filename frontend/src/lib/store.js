@@ -71,6 +71,12 @@ export function useConversations({ onDashboardCreated } = {}) {
       return { conversations: [c, ...s.conversations], activeId: c.id }
     })
 
+  const patchMessage = (convId, msgId, patch) =>
+    update(convId, (c) => ({
+      ...c,
+      messages: c.messages.map((m) => (m.id === msgId ? { ...m, ...patch } : m)),
+    }))
+
   const setView = (convId, msgId, view) =>
     update(convId, (c) => ({
       ...c,
@@ -277,6 +283,7 @@ export function useConversations({ onDashboardCreated } = {}) {
     rename,
     buildDashboard,
     setDatasource,
+    patchMessage,
     startConversation,
     clearTable,
     runSavedQuery,

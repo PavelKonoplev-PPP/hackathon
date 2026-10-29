@@ -92,6 +92,8 @@ export default function DashboardWidget({ widget, shown, filtered, unfiltered, g
             table={shown.table}
             view={widget.grid?.view}
             onChangeView={(v) => onPatch({ grid: { ...widget.grid, view: v } }, true)}
+            split={Boolean(widget.grid?.split)}
+            onToggleSplit={() => onPatch({ grid: { ...widget.grid, split: !widget.grid?.split } }, true)}
             title={widget.title}
             fill
           />
