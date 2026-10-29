@@ -426,18 +426,6 @@ def process_chat_message(
             res["execution_time_ms"] = recorder.total_duration_ms
         return res
 
-    # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете
-    out_of_scope = detect_out_of_scope(message)
-    if out_of_scope:
-        if recorder:
-            recorder.finish("completed")
-        res = out_of_scope.to_dict()
-        res["status"] = "refused"
-        if recorder:
-            res["steps"] = [s.model_dump() for s in recorder.steps]
-            res["execution_time_ms"] = recorder.total_duration_ms
-        return res
-
     if HAS_LLM_MODULE:
         if catalog is None:
             catalog, loaded_rel = load_catalogs()
@@ -472,6 +460,20 @@ def process_chat_message(
                     "sql": None,
                     "clarification": None,
                 }
+
+        # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете. Проверяем после
+        # выбора источника: термин, подтверждённый в бизнес-словаре ЭТОГО источника
+        # («CSAT» → «Оценка клиента», BI-37), не отказ; остальное — отказ как раньше.
+        out_of_scope = detect_out_of_scope(message, catalog=catalog)
+        if out_of_scope:
+            if recorder:
+                recorder.finish("completed")
+            res = out_of_scope.to_dict()
+            res["status"] = "refused"
+            if recorder:
+                res["steps"] = [s.model_dump() for s in recorder.steps]
+                res["execution_time_ms"] = recorder.total_duration_ms
+            return res
 
         # 3. Слишком обобщённый / неоднозначный запрос (если не запрос описания данных и таблица не зафиксирована)
         if not is_describe_intent(message):
