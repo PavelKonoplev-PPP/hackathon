@@ -139,7 +139,8 @@ class OutOfScopeTests(unittest.TestCase):
                                   description="Оценка обращения от 1 до 5", synonyms=["CSAT"])])
         later = time.time() + 5
         os.utime(f.path, (later, later))
-        self.assertIsNone(detect_out_of_scope(q))  # этой же проверкой пользуется бэкенд
+        self.assertIsNone(detect_out_of_scope(q, cat))  # этой же проверкой пользуется бэкенд
+        self.assertIsNotNone(detect_out_of_scope(q))  # без каталога источника — отказ
         trace = {}
         after = answer_question(q, cat, runner, client=ScriptedClient([sql, "Чат 4,1, телефон 3,9."]),
                                 trace=trace)
@@ -148,6 +149,33 @@ class OutOfScopeTests(unittest.TestCase):
         # «NPS» словарь не определял — по-прежнему честный отказ
         nps = answer_question("Какой NPS по каналам?", cat, runner, client=ScriptedClient([]), trace={})
         self.assertIn("нет метрики NPS", nps["answer"])
+
+
+class OutOfScopeIsolationTests(unittest.TestCase):
+    """Ревью #89: синоним снимает отказ только для своего термина и своего источника."""
+
+    CAT = {"schema": "raw", "tables": [{"name": "data_02_Поддержка", "columns": [
+        {"name": "Оценка клиента", "inferred_type": "integer", "conversion": {}},
+        {"name": "Канал обращения", "inferred_type": "category", "conversion": {}}]}]}
+
+    def setUp(self):
+        GlossaryFile(self, [
+            entry("data_02_Поддержка", "Оценка клиента", synonyms=["CSAT"]),
+            entry("data_02_Поддержка", "Канал обращения", synonyms=["точка контакта"]),
+        ])
+
+    def test_only_the_defined_term_is_allowed(self):
+        self.assertIsNone(detect_out_of_scope("Какой средний CSAT по каналам?", self.CAT))
+        self.assertEqual(detect_out_of_scope("Какой NPS и CSAT?", self.CAT).topic, "nps")
+        self.assertEqual(detect_out_of_scope("Какой ROI по точке контакта?", self.CAT).topic, "roi")
+        self.assertEqual(detect_out_of_scope("Какой NPS по точке контакта?", self.CAT).topic, "nps")
+
+    def test_other_source_is_not_affected(self):
+        external = {**self.CAT, "schema": "public"}  # те же имена таблиц, другой источник
+        self.assertEqual(detect_out_of_scope("Какой средний CSAT?", external).topic, "nps")
+        other_table = {"schema": "raw", "tables": [{"name": "data_01_Продажи", "columns": []}]}
+        self.assertEqual(detect_out_of_scope("Какой средний CSAT?", other_table).topic, "nps")
+        self.assertEqual(detect_out_of_scope("Какой средний CSAT?").topic, "nps")
 
 
 @unittest.skipUnless(REAL_CATALOG.is_file(), "нет data/schema-catalog.json")

@@ -60,6 +60,43 @@ class LoadAndMatchTests(unittest.TestCase):
         self.assertIsNone(kp.for_question("Какой CTR?", {"name": "другая"}, "raw", approved))
         self.assertIsNone(kp.for_question("Какой CTR?", table, "public", approved))
 
+    def test_check_rejects_false_positives(self):
+        """Ревью #90: формула должна быть самой колонкой-показателем."""
+        k = kp.Kpi("ads_ctr", "raw", ADS, "CTR", CTR, "%", "", None)
+        bad = {
+            "1 + KPI": f'SELECT "Площадка", 1 + {CTR} AS "CTR" FROM t GROUP BY 1',
+            "в комментарии": f'-- {CTR}\nSELECT "Площадка", SUM("Клики") / SUM("Показы") AS "CTR" FROM t GROUP BY 1',
+            "в /* */": f'SELECT "Площадка" /* {CTR} */, SUM("Клики")::float / SUM("Показы") FROM t GROUP BY 1',
+            "KPI в лишней колонке": (f'SELECT "Площадка", SUM("Клики")::float / SUM("Показы") AS "CTR", '
+                                     f'{CTR} AS "x" FROM t GROUP BY 1'),
+            "KPI в WHERE": f'SELECT "Площадка", SUM("Клики") FROM t WHERE 1 < 2 GROUP BY 1 HAVING {CTR} > 0',
+        }
+        for name, sql in bad.items():
+            with self.subTest(name):
+                self.assertTrue(kp.check(sql, k), sql)
+        ok = {
+            "с разбивкой по месяцам": (f'SELECT date_trunc(\'month\', "Дата") AS "Месяц", {CTR} AS "CTR, %" '
+                                       'FROM t GROUP BY 1 ORDER BY 1'),
+            "с другим показателем": f'SELECT "Площадка", {CTR} AS "CTR", SUM("Расходы, руб.") FROM t GROUP BY 1',
+            "без псевдонима": f'SELECT {CTR} FROM t',
+        }
+        for name, sql in ok.items():
+            with self.subTest(name):
+                self.assertEqual(kp.check(sql, k), [], sql)
+
+    def test_sources_with_same_table_name(self):
+        approved = [kp.Kpi("ads_ctr", "raw", ADS, "CTR", CTR, "%", "", None),
+                    kp.Kpi("ads_ctr", "ext", ADS, "CTR", '100 * SUM("Клики") / SUM("Показы")', "%", "", None),
+                    kp.Kpi("custom", "raw", ADS, "Доля кликов", 'SUM("Клики")', None, "", None)]
+        table = {"name": ADS}
+        self.assertEqual(kp.for_question("Какой CTR?", table, "raw", approved).expression, CTR)
+        self.assertNotEqual(kp.for_question("Какой CTR?", table, "ext", approved).expression, CTR)
+        self.assertIsNone(kp.for_question("Какой CTR?", table, "other", approved))
+        self.assertIsNone(kp.for_question("Какой CTR?", table, None, approved))
+        # KPI без стандартного триггера тоже сверяет источник
+        self.assertEqual(kp.for_question("Какая доля кликов?", table, "raw", approved).id, "custom")
+        self.assertIsNone(kp.for_question("Какая доля кликов?", table, "ext", approved))
+
     def test_check_ignores_spaces_and_case(self):
         k = kp.Kpi("ads_ctr", "raw", ADS, "CTR", CTR, "%", "", None)
         good = 'SELECT "Площадка", 100.0*sum("Клики")/nullif(sum("Показы"),0) FROM t GROUP BY 1'
@@ -94,6 +131,18 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Расчёт по утверждённому определению KPI «CTR», утвердил: Аналитик.",
                       result["answer"])
 
+    def test_formula_required_on_last_attempt(self):
+        """Ревью #90: три раза не по формуле — честная ошибка, а не неверный KPI."""
+        KpiFile(self, [kpi("ads_ctr", ADS, CTR, title="CTR")])
+        wrong = '```sql\nSELECT "Площадка", SUM("Клики")::float / SUM("Показы") AS "CTR" FROM t GROUP BY 1\n```'
+        runner = FakeRunner(rows=[("Яндекс Директ", 0.025)], columns=["Площадка", "CTR"])
+        trace = {}
+        result = answer_question("Какой CTR по площадкам?", self.CAT, runner,
+                                 client=ScriptedClient([wrong, wrong, wrong]), trace=trace)
+        self.assertEqual(runner.sqls, [])  # неверный KPI даже не выполнялся
+        self.assertNotIn("table", result)
+        self.assertIn("Не получилось надёжно посчитать", result["answer"])
+
     def test_without_approval_agent_works_as_before(self):
         KpiFile(self, [kpi("ads_ctr", ADS, CTR, status="proposed")])
         sql = '```sql\nSELECT "Площадка", SUM("Клики")::float / SUM("Показы") AS "CTR" FROM t GROUP BY 1\n```'
@@ -113,8 +162,10 @@ class TableChoiceTests(unittest.TestCase):
         KpiFile(self, [])
         self.assertIsNone(choose_table("Какой CTR?", tables, {})[0])  # без KPI таблица неясна
         KpiFile(self, [kpi("ads_ctr", ADS, CTR, title="CTR")])
-        table, _ = choose_table("Какой CTR?", tables, {})
+        table, _ = choose_table("Какой CTR?", tables, {}, "raw")
         self.assertEqual(table["name"], ADS)
+        # тот же каталог как внешний источник: утверждение в raw его не касается
+        self.assertIsNone(choose_table("Какой CTR?", tables, {}, "public")[0])
 
 
 if __name__ == "__main__":

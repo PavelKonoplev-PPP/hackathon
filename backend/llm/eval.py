@@ -16,7 +16,8 @@
     python -m backend.llm.eval --api http://localhost:8000
     python -m backend.llm.eval --api http://localhost:8000 --holdout
 В этом режиме числа берутся из таблицы ответа API (как их видит пользователь),
-таблица — из комментария к SQL. Эталоны по-прежнему считает PostgreSQL напрямую.
+таблица-источник — из поля table_name ответа, отказ — из status="refused".
+Эталоны по-прежнему считает PostgreSQL напрямую.
 Отчёт сохраняется в data/eval-report.json (с --api — data/eval-report-api.json).
 """
 from __future__ import annotations
@@ -222,7 +223,8 @@ class ApiAsker:
             response = self.chat(step, session)
         table = response.get("table") or None
         return {
-            "table": table_from_sql(response.get("sql")),
+            # источник — структурированное поле ответа; комментарий в SQL не используем
+            "table": response.get("table_name"),
             "rows": [tuple(parse_cell(v) for v in row) for row in table["rows"]] if table else None,
             "sql": response.get("sql"),
             "answer": response.get("answer"),
@@ -252,6 +254,7 @@ def direct_asker(catalog: dict, runner, client=None):
             "answer": response.get("answer"),
             "clarification": trace.get("clarification") or bool(response.get("clarification")),
             "has_table": bool(response.get("table")),
+            "status": response.get("status"),
             "rounded": False,
         }
     return ask
@@ -324,8 +327,14 @@ def run_eval(cases: list[dict], catalog: dict, runner, client=None, gold_only=Fa
             ok = kind == case["clarify"] if isinstance(kind, str) else bool(kind)
             reason = "" if ok else f"ожидалось уточнение ({case['clarify']}), агент: {answer}"
         elif mode == "refuse":
-            ok = rows is None and not got.get("has_table") and not got.get("clarification")
-            reason = "" if ok else "агент не отказался"
+            # отказ — только явный (status="refused"); ответ без таблицы отказом не считается
+            refused = got.get("status") == "refused"
+            ok = refused and rows is None and not got.get("has_table") \
+                and not got.get("clarification")
+            reason = "" if ok else ("агент не отказался" if not refused else
+                                    "статус «отказ», но в ответе есть данные или уточнение")
+        elif rows and not got.get("table"):
+            ok, reason = False, "нет информации о таблице-источнике ответа (table_name)"
         elif got.get("table") and not _same_table(got["table"], case["table"]):
             ok, reason = False, f"не та таблица: {got['table']}"
         elif not rows:

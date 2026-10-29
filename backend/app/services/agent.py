@@ -420,20 +420,8 @@ def process_chat_message(
         if recorder:
             recorder.finish("completed")
         res = mutation.to_dict()
+        res["status"] = "refused"
         if recorder:
-            res["status"] = "refused"
-            res["steps"] = [s.model_dump() for s in recorder.steps]
-            res["execution_time_ms"] = recorder.total_duration_ms
-        return res
-
-    # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете
-    out_of_scope = detect_out_of_scope(message)
-    if out_of_scope:
-        if recorder:
-            recorder.finish("completed")
-        res = out_of_scope.to_dict()
-        if recorder:
-            res["status"] = "refused"
             res["steps"] = [s.model_dump() for s in recorder.steps]
             res["execution_time_ms"] = recorder.total_duration_ms
         return res
@@ -472,6 +460,20 @@ def process_chat_message(
                     "sql": None,
                     "clarification": None,
                 }
+
+        # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете. Проверяем после
+        # выбора источника: термин, подтверждённый в бизнес-словаре ЭТОГО источника
+        # («CSAT» → «Оценка клиента», BI-37), не отказ; остальное — отказ как раньше.
+        out_of_scope = detect_out_of_scope(message, catalog=catalog)
+        if out_of_scope:
+            if recorder:
+                recorder.finish("completed")
+            res = out_of_scope.to_dict()
+            res["status"] = "refused"
+            if recorder:
+                res["steps"] = [s.model_dump() for s in recorder.steps]
+                res["execution_time_ms"] = recorder.total_duration_ms
+            return res
 
         # 3. Слишком обобщённый / неоднозначный запрос (если не запрос описания данных и таблица не зафиксирована)
         if not is_describe_intent(message):
@@ -565,10 +567,11 @@ def process_chat_message(
                 datasource_id=datasource_id,
                 progress=_on_progress,
             )
+            final_status = res.get("status") or (
+                "clarification" if res.get("clarification") else "completed")
             if recorder:
                 recorder.step("synthesize", "Синтез ответа и визуализации")
-                final_status = "clarification" if res.get("clarification") else "completed"
-                recorder.finish(final_status)
+                recorder.finish("completed" if final_status == "refused" else final_status)
 
             table_name_resolved = res.get("table_name") or table_name
             out = {
@@ -579,8 +582,8 @@ def process_chat_message(
                 "clarification": res.get("clarification"),
                 "table_name": table_name_resolved,
             }
+            out["status"] = final_status  # «refused» — явный отказ (BI-06: проверка отказов)
             if recorder:
-                out["status"] = "clarification" if res.get("clarification") else "completed"
                 out["steps"] = [s.model_dump() for s in recorder.steps]
                 out["execution_time_ms"] = recorder.total_duration_ms
             return out

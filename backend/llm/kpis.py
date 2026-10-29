@@ -93,15 +93,16 @@ def load(path: Path | None = None) -> list[Kpi]:
 
 def for_question(question: str, table: dict, schema: str | None,
                  approved: list[Kpi] | None = None) -> Kpi | None:
-    """Утверждённый KPI этой таблицы, о котором спрашивают, или None."""
+    """Утверждённый KPI этой таблицы В ЭТОМ источнике (schema), о котором спрашивают, или None.
+    Таблица с тем же именем в другом источнике чужие KPI не получает."""
     approved = load() if approved is None else approved
+    own = [k for k in approved if k.table == table.get("name") and k.schema == (schema or "")]
     for kpi_id, _ in TRIGGERS:  # узкие раньше широких
-        for k in approved:
-            if k.id == kpi_id and k.table == table.get("name") and k.schema == (schema or k.schema) \
-                    and k.mentioned_in(question):
+        for k in own:
+            if k.id == kpi_id and k.mentioned_in(question):
                 return k
-    for k in approved:  # KPI без известных триггеров — по названию
-        if k.id not in dict(TRIGGERS) and k.table == table.get("name") and k.mentioned_in(question):
+    for k in own:  # KPI без известных триггеров — по названию
+        if k.id not in dict(TRIGGERS) and k.mentioned_in(question):
             return k
     return None
 
@@ -123,11 +124,79 @@ def _norm(sql: str) -> str:
     return re.sub(r"\s+", "", sql).lower()
 
 
-def check(sql: str, kpi: Kpi) -> list[str]:
-    """Проблема, если запрос считает KPI не по утверждённой формуле."""
-    if _norm(kpi.expression) in _norm(sql):
+_AGGREGATE = re.compile(r"\b(sum|avg|count|min|max)\s*\(", re.IGNORECASE)
+_ALIAS = re.compile(r'\s+as\s+("[^"]*"|[a-zа-яё_][\w]*)\s*$', re.IGNORECASE)
+
+
+def _strip_comments(sql: str) -> str:
+    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", " ", sql)
+
+
+def _split_top(text: str) -> list[str]:
+    """Делит по запятым верхнего уровня (не внутри скобок и строк)."""
+    parts, depth, quote, start = [], 0, None, 0
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def select_items(sql: str) -> list[str]:
+    """Выражения внешнего SELECT без псевдонимов (комментарии убраны)."""
+    sql = _strip_comments(sql)
+    m = re.search(r"\bselect\b", sql, re.IGNORECASE)
+    if not m:
         return []
-    return [f"«{kpi.title}» — утверждённый KPI: используй ровно формулу {kpi.expression}"]
+    depth, quote, i = 0, None, m.end()
+    while i < len(sql):  # конец списка — FROM на верхнем уровне
+        ch = sql[i]
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and re.match(r"from\b", sql[i:i + 5], re.IGNORECASE) and \
+                not re.match(r"[\w]", sql[i - 1]):
+            break
+        i += 1
+    body = re.sub(r"^\s*distinct\b", "", sql[m.end():i], flags=re.IGNORECASE)
+    return [_ALIAS.sub("", item).strip() for item in _split_top(body)]
+
+
+def check(sql: str, kpi: Kpi) -> list[str]:
+    """Проблема, если показатель считается не по утверждённой формуле.
+
+    Проверяется сама колонка-показатель, а не подстрока где-то в SQL: среди выражений
+    SELECT должна быть ровно утверждённая формула; выражение, которое содержит формулу
+    (`1 + формула`), или считает KPI по тем же колонкам иначе — ошибка. Формула в
+    комментарии не засчитывается."""
+    expected = _norm(kpi.expression)
+    operands = set(re.findall(r'"([^"]+)"', kpi.expression))
+    items = select_items(sql)
+    exact = [it for it in items if _norm(it) == expected]
+    wrong = [it for it in items if _norm(it) != expected and _AGGREGATE.search(it) and
+             (expected in _norm(it) or
+              (operands and operands <= set(re.findall(r'"([^"]+)"', it))))]
+    if exact and not wrong:
+        return []
+    detail = f" (сейчас: {wrong[0]})" if wrong else ""
+    return [f"«{kpi.title}» — утверждённый KPI: колонка-показатель должна быть ровно "
+            f"{kpi.expression}{detail}"]
 
 
 def note(kpi: Kpi) -> str:
