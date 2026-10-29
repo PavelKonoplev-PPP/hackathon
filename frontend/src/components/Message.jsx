@@ -58,7 +58,7 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
               <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, datasourceId }} />
             )}
             {hasResult && msg.sql && (
-              <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName }} />
+              <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName: msg.tableName || tableName }} />
             )}
             {steps.length > 0 && (
               <button className="link" onClick={() => setShowSteps((v) => !v)}>
