@@ -13,11 +13,16 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
   const { datasources } = useContext(AppContext)
   const [input, setInput] = useState('')
   const [building, setBuilding] = useState(false)
-  const endRef = useRef(null)
+  const listRef = useRef(null)
+  const count = conversation.messages.length
 
+  // Вниз прокручиваем только при новом сообщении, ожидании ответа или смене диалога.
+  // Смена вида графика меняет сообщение, но не их число — позиция чтения сохраняется.
+  // Прокручиваем сам список, а не страницу целиком.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [conversation.id, conversation.messages, loading])
+    const el = listRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }, [conversation.id, count, loading])
 
   function send(text) {
     if (!text.trim() || loading) return
@@ -82,7 +87,7 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
           )}
         </div>
       )}
-      <div className="messages">
+      <div className="messages" ref={listRef}>
         {empty && (
           <div className="welcome">
             <h2>Спросите о ваших данных</h2>
@@ -129,7 +134,6 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
             </div>
           </div>
         )}
-        <div ref={endRef} />
       </div>
 
       <form
