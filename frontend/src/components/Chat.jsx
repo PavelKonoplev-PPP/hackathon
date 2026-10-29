@@ -1,6 +1,7 @@
 import { useContext, useEffect, useRef, useState } from 'react'
 import Message from './Message.jsx'
 import { AppContext } from '../lib/appContext.js'
+import { questionFor } from '../lib/dashboardsApi.js'
 
 const SUGGESTIONS = [
   'Опиши данные',
@@ -42,7 +43,6 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
 
   const empty = conversation.messages.length === 0
   const resultCount = conversation.messages.filter((m) => m.role === 'assistant' && !m.error && (m.chart || m.table)).length
-  let question = null
 
   return (
     <div className="chat">
@@ -97,13 +97,13 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
           </div>
         )}
 
-        {conversation.messages.map((m) => {
-          if (m.role === 'user') question = m.text
+        {conversation.messages.map((m, i) => {
+          const question = m.role === 'assistant' ? questionFor(conversation.messages, i) : null
           return (
             <Message
               key={m.id}
               msg={m}
-              question={m.role === 'assistant' ? question : null}
+              question={question}
               datasourceId={conversation.datasourceId}
               tableName={conversation.tableName}
               onPickOption={send}

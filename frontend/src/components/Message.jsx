@@ -10,7 +10,7 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
   const steps = Array.isArray(msg.steps) ? msg.steps : []
   const isUser = msg.role === 'user'
   const hasResult = !msg.error && (msg.chart || msg.table)
-  const title = msg.chart?.title || question || 'Результат'
+  const title = question || msg.chart?.title || 'Результат'
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
@@ -58,7 +58,7 @@ export default function Message({ msg, question, datasourceId, tableName, onPick
               <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, datasourceId }} />
             )}
             {hasResult && msg.sql && (
-              <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName }} />
+              <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName: msg.tableName || tableName }} />
             )}
             {steps.length > 0 && (
               <button className="link" onClick={() => setShowSteps((v) => !v)}>

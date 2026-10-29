@@ -61,17 +61,12 @@ const local = {
 
 export const queriesApi = isMock ? local : remote
 
-// SQL агента написан для временной таблицы `t`, которую строит раннер агента; напрямую в базе
-// он не выполнится (relation "t" does not exist). Такой запрос сохраняем без SQL — при запуске
-// бэкенд заново задаст вопрос агенту (см. #81).
-const AGENT_SQL = /(^|\n)\s*--\s*t\s*=|\bfrom\s+t\b/i
-
 // Запрос из ответа агента: вопрос, SQL и выбранный вид графика.
 export function savedQueryFromMessage({ title, question, sql, chart, view, datasourceId, tableName }) {
   return {
     title,
     question: question || title,
-    sql: sql && !AGENT_SQL.test(sql) ? sql : null,
+    sql: sql || null, // SQL агента (FROM t) бэкенд выполняет через свой раннер (#85)
     datasource_id: datasourceId || 'raw',
     table_name: tableName || null,
     chart_config: chart ? { type: view || chart.type } : null,

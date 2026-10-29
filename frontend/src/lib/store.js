@@ -135,6 +135,7 @@ export function useConversations({ onDashboardCreated } = {}) {
         chart: source.chart,
         table: source.table,
         sql: source.sql,
+        tableName: source.tableName || null,
         view: problem ? 'bar' : wantedView,
       }
       update(id, (c) => ({ ...c, messages: [...c.messages, userMsg, botMsg], updatedAt: Date.now() }))
@@ -201,6 +202,7 @@ export function useConversations({ onDashboardCreated } = {}) {
     sql: reply.sql,
     clarification: reply.clarification,
     status: reply.status,
+    tableName: reply.table_name || null,
     steps: reply.steps,
     executionMs: reply.execution_time_ms,
     ...extra,
