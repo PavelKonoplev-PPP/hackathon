@@ -476,6 +476,8 @@ class RefusalInfo:
             "table": None,
             "sql": None,
             "clarification": self.clarification,
+            # явный признак для API и тестов точности: отказ ≠ «просто ответ без таблицы»
+            "status": "clarification" if self.clarification else "refused",
         }
 
 
@@ -616,20 +618,42 @@ def check_destructive_mutation(question: str) -> RefusalInfo | None:
     return None
 
 
-def detect_out_of_scope(question: str) -> RefusalInfo | None:
+def detect_out_of_scope(question: str, catalog: dict | None = None) -> RefusalInfo | None:
     """Поиск запросов метрик или сущностей, отсутствующих в нашем датасете.
-    Термин, подтверждённый в бизнес-словаре («CSAT» → «Оценка клиента», BI-37), — не отказ."""
+
+    catalog — каталог АКТИВНОГО источника (с учётом выбранной таблицы). Неподдерживаемый
+    термин не вызывает отказ, только если КАЖДОЕ его упоминание в вопросе целиком покрыто
+    синонимом подтверждённого поля этого каталога из бизнес-словаря (BI-37): «CSAT» →
+    «Оценка клиента». «Какой NPS и CSAT?» — NPS не определён, отказ. Без каталога
+    (или для внешнего источника, если подтверждено только в raw) — отказ как раньше."""
+    covered = _glossary_spans(question, catalog)
     for topic, pattern, explanation, suggestions in UNSUPPORTED_METRICS:
-        if pattern.search(question):
-            from .glossary import trusted_term  # glossary сам импортирует semantics
-            if trusted_term(question):
-                continue
+        found = list(pattern.finditer(question))
+        if found:
+            if covered and all(any(a <= m.start() and m.end() <= b for a, b in covered)
+                               for m in found):
+                continue  # этот термин команда сама определила для активного источника
             return RefusalInfo(
                 topic=topic,
                 explanation=explanation,
                 suggestions=suggestions,
             )
     return None
+
+
+def _glossary_spans(question: str, catalog: dict | None) -> list[tuple[int, int]]:
+    """Где в вопросе стоят синонимы подтверждённых полей активного каталога."""
+    if not catalog:
+        return []
+    from .glossary import apply, synonyms  # glossary сам импортирует semantics
+    low = question.lower()
+    spans = []
+    for table in apply(catalog).get("tables") or []:
+        for column in table.get("columns") or []:
+            for synonym in synonyms(column):
+                pattern = r"(?<![а-яёa-z0-9])" + re.escape(synonym.lower()) + r"(?![а-яёa-z0-9])"
+                spans += [m.span() for m in re.finditer(pattern, low)]
+    return spans
 
 
 def detect_ambiguous_query(question: str) -> RefusalInfo | None:

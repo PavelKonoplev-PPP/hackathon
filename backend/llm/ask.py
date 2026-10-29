@@ -174,7 +174,7 @@ def mentioned_columns(question: str, table: dict, limit: int = 3) -> list[str]:
 
 def keyword_scores(question: str, tables: list[dict],
                    values_by_table: dict[str, dict[str, list[str]]] | None = None,
-                   detail: list | None = None) -> list[int]:
+                   detail: list | None = None, schema: str | None = None) -> list[int]:
     """Насколько вопрос похож на таблицу. Каждое слово вопроса считается один раз:
     совпало с названием таблицы — 2 очка, с колонкой или значением категории — 1.
     detail (необязательно) получает для каждой таблицы число надёжных совпадений с
@@ -201,20 +201,21 @@ def keyword_scores(question: str, tables: list[dict],
                 structural += any(strong_word(q, w) for w in col_words)
             elif any(same_word(q, w) for w in value_words):
                 score += 1
-        bonus = kp.table_bonus(question, t, None, approved_kpis)  # утверждённый KPI этой таблицы
+        bonus = kp.table_bonus(question, t, schema, approved_kpis)  # KPI этой таблицы и источника
         scores.append(score + bonus)
         if detail is not None:
             detail.append(structural + (1 if bonus else 0))
     return scores
 
 
-def choose_table(question: str, tables: list[dict], values_by_table: dict) -> tuple[dict | None, list[dict]]:
+def choose_table(question: str, tables: list[dict], values_by_table: dict,
+                 schema: str | None = None) -> tuple[dict | None, list[dict]]:
     """(таблица, []) — выбрана; (None, кандидаты) — нужна помощь пользователя.
     Кандидатов нет — вопрос не про эти данные."""
     if not tables:
         return None, []
     structural: list[int] = []
-    scores = keyword_scores(question, tables, values_by_table, structural)
+    scores = keyword_scores(question, tables, values_by_table, structural, schema)
     order = sorted(range(len(tables)), key=lambda i: -scores[i])
     best = scores[order[0]]
     analytic = bool(ANALYTIC_WORDS.search(question) or wi.WHATIF.search(question)
@@ -560,21 +561,43 @@ def _values_for_all(runner, tables: list[dict]) -> dict:
     return values
 
 
-def _refuse(text: str, suggestions: list[str] | None = None) -> dict:
+def _refuse(text: str, suggestions: list[str] | None = None, refused: bool = True) -> dict:
+    """refused=True — отказ отвечать (вопрос не про данные): status="refused".
+    refused=False — ответа нет по другой причине (не удалось посчитать): статус обычный."""
     suggs = suggestions or DEFAULT_DATASET_SUGGESTIONS
     formatted_answer = text
     if not any(s in text for s in suggs):
         formatted_answer = f"{text}\n\nВы можете запросить, например:\n" + "\n".join(f"- {s}" for s in suggs[:3])
-    return {
+    response = {
         "answer": formatted_answer,
         "sql": None,
     }
+    if refused:
+        response["status"] = "refused"
+    return response
 
 
 
 # ---------- основной сценарий ----------
 
 def answer_question(question: str, catalog: dict, runner, client=None,
+                    progress=None, trace: dict | None = None,
+                    session_id: str | None = None,
+                    table_name: str | None = None,
+                    datasource_id: str | None = None, _nested: bool = False) -> dict:
+    """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification,
+    а также table_name — таблица, по которой посчитан результат (для проверки источника),
+    и status="refused" для отказов. Подробности — в _answer_question."""
+    trace = trace if trace is not None else {}
+    response = _answer_question(question, catalog, runner, client=client, progress=progress,
+                                trace=trace, session_id=session_id, table_name=table_name,
+                                datasource_id=datasource_id, _nested=_nested)
+    if response.get("table") and trace.get("table") and not response.get("table_name"):
+        response["table_name"] = trace["table"]
+    return response
+
+
+def _answer_question(question: str, catalog: dict, runner, client=None,
                     progress=None, trace: dict | None = None,
                     session_id: str | None = None,
                     table_name: str | None = None,
@@ -653,7 +676,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
 
     # Проверка запроса отсутствующих в датасете сущностей и метрик (NPS, ROI, LTV, ТВ-реклама и т.д.)
     # (кроме терминов, которые команда сама определила в бизнес-словаре: «CSAT» → оценка клиента)
-    out_of_scope_refusal = detect_out_of_scope(question)
+    out_of_scope_refusal = detect_out_of_scope(question, catalog)  # активный источник/таблица
     if out_of_scope_refusal:
         return out_of_scope_refusal.to_dict()
 
@@ -678,7 +701,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if is_pure_view_request(question):
         if not last or last["table"] not in by_name:
             return _refuse("Сначала задайте вопрос к данным — потом я покажу результат "
-                           "в нужном виде.")
+                           "в нужном виде.", refused=False)
         view = requested_view(question)
         say(f"Меняю вид прошлого результата: {view}")
         result = runner.run(by_name[last["table"]], last["sql"])
@@ -698,7 +721,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
         followup = is_followup(question)
         if not followup and is_short_refinement(question, tables):
             values_by_table = _values_for_all(runner, tables)
-            guess, _ = choose_table(question, tables, values_by_table)
+            guess, _ = choose_table(question, tables, values_by_table, catalog.get("schema"))
             # только если вопрос указывает на ту же таблицу: «Какая погода в Москве?» после
             # вопроса о выручке — не уточнение, а вопрос не по данным
             followup = guess is not None and guess["name"] == last["table"]
@@ -713,7 +736,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     else:
         say("Выбираю таблицу")
         values_by_table = values_by_table or _values_for_all(runner, tables)
-        table, candidates = choose_table(question, tables, values_by_table)
+        table, candidates = choose_table(question, tables, values_by_table, catalog.get("schema"))
         if table is None:
             if not candidates:
                 return _refuse("Этот вопрос не похож на вопрос к загруженным данным. "
@@ -837,8 +860,8 @@ def answer_question(question: str, catalog: dict, runner, client=None,
                                  aliases=gl.aliases(table))
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
-            if kpi and attempt < MAX_ATTEMPTS:
-                problems += kp.check(sql, kpi)
+            if kpi:  # утверждённая формула обязательна на всех попытках: лучше честная
+                problems += kp.check(sql, kpi)  # ошибка, чем неверный KPI под видом результата
             if problems:
                 raise SQLRejected(" ".join(problems))
             result = runner.run(table, sql)
@@ -855,7 +878,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     else:
         return _refuse("Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
                        "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
-                       "разрезе нужен.")
+                       "разрезе нужен.", refused=False)
 
     trace.update(sql=sql, columns=result.columns, rows=result.rows)
     state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
@@ -950,7 +973,8 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
     if table is None and last and not words(base_text) and not forecast:
         table = next((t for t in tables if t["name"] == last["table"]), None)
     if table is None:
-        table, _ = choose_table(question, tables, _values_for_all(runner, tables))
+        table, _ = choose_table(question, tables, _values_for_all(runner, tables),
+                                catalog.get("schema"))
     if table is None:
         return None
     columns = [c["name"] for c in table.get("columns") or []]
@@ -991,7 +1015,7 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
             new_sql = None
     if new_sql is None and change.kind == "pp":
         return _refuse(f"Не получилось применить изменение на {abs(change.value):g} п.п.: величина "
-                       "не входит в расчёт показателя. Уточните, какую колонку менять.")
+                       "не входит в расчёт показателя. Уточните, какую колонку менять.", refused=False)
     combined = wi.combine(cols, rows, new_rows, change)
     if not combined:
         return base
@@ -1021,7 +1045,7 @@ def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tupl
     series.sort(key=lambda x: x[0])
     if len(series) < 6:
         return _refuse("Для прогноза нужен помесячный ряд хотя бы из 6 точек — "
-                       "в данных его не получилось построить.")
+                       "в данных его не получилось построить.", refused=False)
     steps = wi.forecast_steps(question)
     projected = adv.linear_extrapolation([v for _, v in series], steps)
     months = []
