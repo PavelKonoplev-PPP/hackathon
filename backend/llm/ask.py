@@ -556,21 +556,43 @@ def _values_for_all(runner, tables: list[dict]) -> dict:
     return values
 
 
-def _refuse(text: str, suggestions: list[str] | None = None) -> dict:
+def _refuse(text: str, suggestions: list[str] | None = None, refused: bool = True) -> dict:
+    """refused=True — отказ отвечать (вопрос не про данные): status="refused".
+    refused=False — ответа нет по другой причине (не удалось посчитать): статус обычный."""
     suggs = suggestions or DEFAULT_DATASET_SUGGESTIONS
     formatted_answer = text
     if not any(s in text for s in suggs):
         formatted_answer = f"{text}\n\nВы можете запросить, например:\n" + "\n".join(f"- {s}" for s in suggs[:3])
-    return {
+    response = {
         "answer": formatted_answer,
         "sql": None,
     }
+    if refused:
+        response["status"] = "refused"
+    return response
 
 
 
 # ---------- основной сценарий ----------
 
 def answer_question(question: str, catalog: dict, runner, client=None,
+                    progress=None, trace: dict | None = None,
+                    session_id: str | None = None,
+                    table_name: str | None = None,
+                    datasource_id: str | None = None, _nested: bool = False) -> dict:
+    """Ответ в формате docs/api-contract.md: answer, table, sql, chart, clarification,
+    а также table_name — таблица, по которой посчитан результат (для проверки источника),
+    и status="refused" для отказов. Подробности — в _answer_question."""
+    trace = trace if trace is not None else {}
+    response = _answer_question(question, catalog, runner, client=client, progress=progress,
+                                trace=trace, session_id=session_id, table_name=table_name,
+                                datasource_id=datasource_id, _nested=_nested)
+    if response.get("table") and trace.get("table") and not response.get("table_name"):
+        response["table_name"] = trace["table"]
+    return response
+
+
+def _answer_question(question: str, catalog: dict, runner, client=None,
                     progress=None, trace: dict | None = None,
                     session_id: str | None = None,
                     table_name: str | None = None,
@@ -672,7 +694,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     if is_pure_view_request(question):
         if not last or last["table"] not in by_name:
             return _refuse("Сначала задайте вопрос к данным — потом я покажу результат "
-                           "в нужном виде.")
+                           "в нужном виде.", refused=False)
         view = requested_view(question)
         say(f"Меняю вид прошлого результата: {view}")
         result = runner.run(by_name[last["table"]], last["sql"])
@@ -838,7 +860,7 @@ def answer_question(question: str, catalog: dict, runner, client=None,
     else:
         return _refuse("Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
                        "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
-                       "разрезе нужен.")
+                       "разрезе нужен.", refused=False)
 
     trace.update(sql=sql, columns=result.columns, rows=result.rows)
     state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
@@ -972,7 +994,7 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
             new_sql = None
     if new_sql is None and change.kind == "pp":
         return _refuse(f"Не получилось применить изменение на {abs(change.value):g} п.п.: величина "
-                       "не входит в расчёт показателя. Уточните, какую колонку менять.")
+                       "не входит в расчёт показателя. Уточните, какую колонку менять.", refused=False)
     combined = wi.combine(cols, rows, new_rows, change)
     if not combined:
         return base
@@ -1002,7 +1024,7 @@ def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tupl
     series.sort(key=lambda x: x[0])
     if len(series) < 6:
         return _refuse("Для прогноза нужен помесячный ряд хотя бы из 6 точек — "
-                       "в данных его не получилось построить.")
+                       "в данных его не получилось построить.", refused=False)
     steps = wi.forecast_steps(question)
     projected = adv.linear_extrapolation([v for _, v in series], steps)
     months = []

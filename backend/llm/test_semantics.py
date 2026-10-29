@@ -350,6 +350,60 @@ class AmbiguousQueryTests(unittest.TestCase):
             self.assertIsNone(detect_ambiguous_query(q), f"False positive ambiguity on: {q}")
 
 
+class HoldoutFindingsTests(unittest.TestCase):
+    """Общие исправления по провалам на незнакомых вопросах (BI-06 / #34)."""
+
+    def test_value_is_not_part_of_other_word(self):
+        values = {"Тип операции": ["Продажа", "Возврат"]}
+        q = "Какой способ оплаты используют чаще всего по числу записей о продажах?"
+        self.assertFalse(mentions(q, "Продажа", {"продажи"}))
+        self.assertTrue(mentions("Сколько операций «Продажа»?", "Продажа", {"продажи"}))
+        self.assertTrue(mentions("Сколько продаж через Мобильное приложение?", "Мобильное приложение"))
+        from backend.llm.semantics import strip_unmentioned_filters
+        sql = 'SELECT "Способ оплаты", COUNT(*) FROM t WHERE "Тип операции" = \'Продажа\' GROUP BY 1'
+        self.assertEqual(strip_unmentioned_filters(sql, q, values, {"продажи"})[1],
+                         ['"Тип операции" = \'Продажа\''])
+
+    def test_intent_phrases(self):
+        self.assertTrue(Intent.parse("Какой способ оплаты используют чаще всего?").wants_top)
+        self.assertTrue(Intent.parse("Сколько задач у каждой команды?").wants_groups)
+
+    def test_how_many_pieces_is_sum(self):
+        q = "Сколько штук товаров продали за 2025 год?"
+        cols = ["Количество, шт.", "Цена до скидки за единицу, руб."]
+        problems = check_sql('SELECT COUNT("Количество, шт.") FROM t', q, Intent.parse(q), {},
+                             numeric_columns=cols)
+        self.assertIn('SUM("Количество, шт.")', " ".join(problems))
+        self.assertEqual(check_sql('SELECT SUM("Количество, шт.") FROM t', q, Intent.parse(q), {},
+                                   numeric_columns=cols), [])
+
+    def test_average_arithmetic(self):
+        q = "Сколько в среднем попыток вручения у каждого перевозчика?"
+        bad = 'SELECT "Перевозчик", 100.0 * AVG("Попытки вручения") / COUNT(*) FROM t GROUP BY 1'
+        text = " ".join(check_sql(bad, q, Intent.parse(q), {}))
+        self.assertIn("Не дели AVG", text)
+        self.assertIn("Не умножай среднее на 100", text)
+        good = 'SELECT "Перевозчик", AVG("Попытки вручения") FROM t GROUP BY 1'
+        self.assertEqual(check_sql(good, q, Intent.parse(q), {}), [])
+
+    def test_group_by_column_named_like_table(self):
+        cols = ["Команда", "Статус"]
+        q = "Сколько задач у каждой команды?"
+        ignore = {"задачи", "команд"}
+        sql = 'SELECT "Команда", COUNT(*) FROM t GROUP BY "Команда"'
+        self.assertEqual(check_sql(sql, q, Intent.parse(q), {}, ignore=ignore, columns=cols), [])
+        q2 = "Сколько задач в каждом статусе?"
+        sql2 = 'SELECT "Статус", "Команда", COUNT(*) FROM t GROUP BY "Статус", "Команда"'
+        self.assertIn("Лишняя группировка", " ".join(
+            check_sql(sql2, q2, Intent.parse(q2), {}, ignore=ignore, columns=cols)))
+        # слово из названия таблицы вне разбивки — не повод группировать по «Команда»
+        q3 = "Сколько задач команд в каждом статусе?"
+        self.assertIn("Лишняя группировка", " ".join(
+            check_sql(sql2, q3, Intent.parse(q3), {}, ignore=ignore, columns=cols)))
+        q4 = "Сколько задач по командам?"
+        self.assertEqual(check_sql(sql, q4, Intent.parse(q4), {}, ignore=ignore, columns=cols), [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
