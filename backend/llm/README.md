@@ -11,7 +11,8 @@
 | `sql_guard.py` | Проверка SQL модели: только один SELECT из `t`, без опасных функций и чужих таблиц |
 | `sql_runner.py` | Таблица `t` с приведёнными типами (по каталогу) и выполнение в read-only транзакции |
 | `semantics.py` | Разбор вопроса и смысловая проверка SQL: «сколько» → COUNT/SUM, «разных» → DISTINCT, LIMIT только для топа, фильтры только из вопроса |
-| `eval.py`, `eval_cases.py` | Тесты аналитической точности: 45 вопросов с эталоном (SQL или число), уточнения, отказы, диалоги |
+| `eval.py`, `eval_cases.py` | Тесты аналитической точности: 53 вопроса с эталоном (SQL или число), уточнения, отказы, диалоги; прямой и сквозной (через FastAPI) режимы |
+| `eval_holdout.py` | 15 «незнакомых» вопросов, которые не использовались при настройке агента (BI-06 / #34) |
 | `test_ask.py`, `test_semantics.py`, `test_eval.py` | Тесты без модели и без БД |
 | `test_describe.py` | Тесты без модели и без БД |
 | `Modelfile` | Локальная модель с большим контекстом: `ollama create qwen-bi -f backend/llm/Modelfile` |
@@ -79,6 +80,28 @@ python -m backend.llm.eval --gold-only        # проверить эталон�
 python -m backend.llm.eval                    # полный прогон, отчёт: data/eval-report.json
 python -m backend.llm.eval --only ctrl_rows_no_card
 ```
+
+### Сквозной прогон через API и незнакомые вопросы (BI-06 / #34)
+
+Те же вопросы можно задать запущенному бэкенду — ровно так, как их задаёт фронтенд
+(`POST /api/chat/jobs` + опрос `GET /api/chat/jobs/{id}`). Проверяется вся цепочка
+FastAPI → агент → PostgreSQL → ответ; числа берутся из таблицы ответа, которую видит
+пользователь. Эталоны по-прежнему считает PostgreSQL напрямую.
+
+```bash
+uvicorn backend.app.main:app --port 8000                      # в отдельном терминале
+python -m backend.llm.eval --api http://localhost:8000          # 53 вопроса, отчёт: data/eval-report-api.json
+python -m backend.llm.eval --api http://localhost:8000 --holdout   # 15 незнакомых вопросов
+python -m backend.llm.eval --api http://localhost:8000 --api-sync  # через POST /api/chat
+python -m backend.llm.eval --holdout --gold-only                # проверить эталоны незнакомых
+```
+
+Отказ засчитывается только при явном `status: "refused"` в ответе (ответ без таблицы —
+не отказ); таблица-источник берётся из поля `table_name` ответа, без него кейс с данными —
+провал.
+
+Правило для `eval_holdout.py`: если незнакомый вопрос провалился, агента чинят в общем виде,
+а сам вопрос под агента не переписывают. Отчёты в `data/` не коммитим.
 
 Выгрузка значений категорий (для теста выбора таблицы без БД, `test_eval.TableChoiceTests`):
 
