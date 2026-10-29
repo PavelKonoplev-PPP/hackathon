@@ -1,6 +1,7 @@
 // Дашборды: сервер /api/dashboards (BI-15) или локальное хранилище в демо-режиме.
 import { isMock, request } from './api.js'
 import { deriveKpis } from './format.js'
+import { detectViewRequest } from './chartViews.js'
 
 const LOCAL_KEY = 'bi-dashboards-local-v1'
 
@@ -90,13 +91,22 @@ export function widgetFromResult({ title, text, chart, table, sql, view }) {
   }
 }
 
-// Результаты диалога: ответы с графиком или таблицей, заголовок — вопрос пользователя.
+// Вопрос, к которому относится ответ: команды «покажи кругом» пропускаем — они про вид, а не про данные.
+export function questionFor(messages, index) {
+  for (let i = index - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'user' && !detectViewRequest(m.text)) return m.text
+  }
+  return null
+}
+
+// Результаты диалога: ответы с графиком или таблицей. Заголовок — вопрос пользователя:
+// заголовок графика от бэкенда часто совпадает с подписью оси («Выручка, руб.»).
 export function resultsFromMessages(messages) {
   const out = []
   messages.forEach((m, i) => {
     if (m.role !== 'assistant' || m.error || !(m.chart || m.table)) return
-    const question = [...messages.slice(0, i)].reverse().find((x) => x.role === 'user')
-    out.push({ ...m, title: m.chart?.title || question?.text })
+    out.push({ ...m, title: questionFor(messages, i) || m.chart?.title })
   })
   return out
 }

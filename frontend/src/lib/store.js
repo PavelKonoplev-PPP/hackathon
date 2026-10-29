@@ -135,6 +135,7 @@ export function useConversations({ onDashboardCreated } = {}) {
         chart: source.chart,
         table: source.table,
         sql: source.sql,
+        tableName: source.tableName || null,
         view: problem ? 'bar' : wantedView,
       }
       update(id, (c) => ({ ...c, messages: [...c.messages, userMsg, botMsg], updatedAt: Date.now() }))
