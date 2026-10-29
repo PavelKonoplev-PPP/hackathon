@@ -30,6 +30,7 @@ from collections import OrderedDict
 from . import advanced_analytics as adv
 from . import compare as cmp
 from . import glossary as gl
+from . import kpis as kp
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -173,12 +174,13 @@ def mentioned_columns(question: str, table: dict, limit: int = 3) -> list[str]:
 
 def keyword_scores(question: str, tables: list[dict],
                    values_by_table: dict[str, dict[str, list[str]]] | None = None,
-                   detail: list | None = None) -> list[int]:
+                   detail: list | None = None, schema: str | None = None) -> list[int]:
     """Насколько вопрос похож на таблицу. Каждое слово вопроса считается один раз:
     совпало с названием таблицы — 2 очка, с колонкой или значением категории — 1.
     detail (необязательно) получает для каждой таблицы число надёжных совпадений с
     названием таблицы или колонок (почти та же словоформа) — для разрешения ничьих."""
     asked = words(question)
+    approved_kpis = kp.load()
     scores = []
     for t in tables:
         name_words = words(display_table_name(t["name"]))
@@ -199,19 +201,21 @@ def keyword_scores(question: str, tables: list[dict],
                 structural += any(strong_word(q, w) for w in col_words)
             elif any(same_word(q, w) for w in value_words):
                 score += 1
-        scores.append(score)
+        bonus = kp.table_bonus(question, t, schema, approved_kpis)  # KPI этой таблицы и источника
+        scores.append(score + bonus)
         if detail is not None:
-            detail.append(structural)
+            detail.append(structural + (1 if bonus else 0))
     return scores
 
 
-def choose_table(question: str, tables: list[dict], values_by_table: dict) -> tuple[dict | None, list[dict]]:
+def choose_table(question: str, tables: list[dict], values_by_table: dict,
+                 schema: str | None = None) -> tuple[dict | None, list[dict]]:
     """(таблица, []) — выбрана; (None, кандидаты) — нужна помощь пользователя.
     Кандидатов нет — вопрос не про эти данные."""
     if not tables:
         return None, []
     structural: list[int] = []
-    scores = keyword_scores(question, tables, values_by_table, structural)
+    scores = keyword_scores(question, tables, values_by_table, structural, schema)
     order = sorted(range(len(tables)), key=lambda i: -scores[i])
     best = scores[order[0]]
     analytic = bool(ANALYTIC_WORDS.search(question) or wi.WHATIF.search(question)
@@ -717,7 +721,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
         followup = is_followup(question)
         if not followup and is_short_refinement(question, tables):
             values_by_table = _values_for_all(runner, tables)
-            guess, _ = choose_table(question, tables, values_by_table)
+            guess, _ = choose_table(question, tables, values_by_table, catalog.get("schema"))
             # только если вопрос указывает на ту же таблицу: «Какая погода в Москве?» после
             # вопроса о выручке — не уточнение, а вопрос не по данным
             followup = guess is not None and guess["name"] == last["table"]
@@ -732,7 +736,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     else:
         say("Выбираю таблицу")
         values_by_table = values_by_table or _values_for_all(runner, tables)
-        table, candidates = choose_table(question, tables, values_by_table)
+        table, candidates = choose_table(question, tables, values_by_table, catalog.get("schema"))
         if table is None:
             if not candidates:
                 return _refuse("Этот вопрос не похож на вопрос к загруженным данным. "
@@ -822,6 +826,14 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
 
+    # Утверждённый бизнес-KPI (#57): формула из data/kpi-definitions.json, а не своя.
+    # В сравнении периодов не используем: FILTER к составной формуле так не приклеить.
+    kpi = None if periods else kp.for_question(full_question, table, catalog.get("schema"))
+    if kpi:
+        extra_hint += kp.hint(kpi)
+        trace["kpi"] = kpi.id
+        say(f"Утверждённый KPI: {kpi.title}")
+
     # 5. SQL с проверками
     values = (values_by_table or {}).get(table["name"])
     if values is None:
@@ -848,6 +860,8 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                                  aliases=gl.aliases(table))
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
+            if kpi:  # утверждённая формула обязательна на всех попытках: лучше честная
+                problems += kp.check(sql, kpi)  # ошибка, чем неверный KPI под видом результата
             if problems:
                 raise SQLRejected(" ".join(problems))
             result = runner.run(table, sql)
@@ -910,6 +924,8 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     note = missing_note(sql, table)
     if note:
         answer = f"{answer} {note}"
+    if kpi and kp.check(sql, kpi) == []:
+        answer = f"{answer} {kp.note(kpi)}"
 
     if cmp.is_compare(full_question):
         answer = f"{answer} {two_segment_difference(result.columns, result.rows)}".strip()
@@ -957,7 +973,8 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
     if table is None and last and not words(base_text) and not forecast:
         table = next((t for t in tables if t["name"] == last["table"]), None)
     if table is None:
-        table, _ = choose_table(question, tables, _values_for_all(runner, tables))
+        table, _ = choose_table(question, tables, _values_for_all(runner, tables),
+                                catalog.get("schema"))
     if table is None:
         return None
     columns = [c["name"] for c in table.get("columns") or []]
