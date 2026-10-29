@@ -1,6 +1,8 @@
 // Форматирование чисел и дат для бизнес-пользователя.
 
-const nf = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 })
+// Не больше 3 знаков после запятой во всём интерфейсе.
+export const MAX_FRACTION = 3
+const nf = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: MAX_FRACTION })
 const nf1 = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 })
 const monthFmt = new Intl.DateTimeFormat('ru-RU', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
@@ -43,9 +45,14 @@ export function formatCompact(v) {
 }
 
 // Ячейка таблицы: числа — с разделителями разрядов, коды-строки не трогаем.
+// Дробное число строкой («3.2845623», «12,5»): бэкенд так отдаёт Decimal. Целые строки не трогаем —
+// это могут быть коды с ведущими нулями.
+const FRACTION_STR = /^-?\d+[.,]\d+$/
+
 export function formatCell(v, column) {
   if (typeof v === 'number') return formatValue(v, unitOf(column))
   if (v === null || v === undefined) return '—'
+  if (typeof v === 'string' && FRACTION_STR.test(v.trim())) return formatValue(v.trim(), unitOf(column))
   return String(v)
 }
 
