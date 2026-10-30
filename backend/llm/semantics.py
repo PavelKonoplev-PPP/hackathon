@@ -335,6 +335,21 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
             + ", ".join(candidates[:4]) + ". Добавь нужное условие в WHERE."]
 
 
+def _check_extra_conditions(sql: str, question: str, ignore: set[str] | None) -> list[str]:
+    """Условия, которых нет в вопросе (E2E): «"Код покупателя" IS NULL» к вопросу «без карты»
+    и подзапросы «NOT IN (SELECT …)» вместо простого фильтра по значению."""
+    problems = []
+    if re.search(r"\(\s*select\b", sql, re.IGNORECASE):
+        problems.append("Не используй подзапросы: фильтруй прямо по значению категории — "
+                        "WHERE \"колонка\" = 'значение'.")
+    asked = _asked_words(question, ignore)
+    for column in re.findall(r'"([^"]+)"\s+is\s+(?:not\s+)?null', sql, re.IGNORECASE):
+        if not overlap(asked, _short_words(column)):
+            problems.append(f"Условие \"{column}\" IS NULL / IS NOT NULL не следует из вопроса — "
+                            "убери его.")
+    return problems
+
+
 def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
                  ignore: set[str] | None) -> list[str]:
     """Доля значения от общего (#96): «доля обращений через чат» — одно число
@@ -410,6 +425,8 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
         problems.append("Запрос должен брать данные из таблицы t.")
 
     problems += _check_share(sql, question, intent, values, ignore)
+    if strict:
+        problems += _check_extra_conditions(sql, question, ignore)
     if columns:
         problems += _check_group_by(sql, question, columns, ignore, values, aliases)
         problems += check_money(sql, question, columns)

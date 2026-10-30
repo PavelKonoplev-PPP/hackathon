@@ -669,6 +669,7 @@ class E2EFindingsTests(unittest.TestCase):
         result, client, trace = ask("А какая доля продаж приходится на мобильное приложение?",
                                     [share, "x"], runner, session="s")
         self.assertEqual(len(client.calls[0]), 2)  # без прошлого SQL с GROUP BY
+        self.assertIn("ОДНО число, без GROUP BY", client.calls[0][0]["content"])
         self.assertEqual(trace["errors"], [])
         self.assertEqual(trace["table"], "data_01_Продажи")
 

@@ -974,6 +974,23 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
 
+    # Доля значения от общего (#96): подсказываем точную формулу — одно число без группировки
+    if SHARE.search(full_question) and not intent.wants_groups:
+        share_values = (values_by_table or {}).get(table["name"])
+        if share_values is None:
+            try:
+                share_values = runner.category_values(table) or {}
+            except Exception:
+                share_values = {}
+        ignore_words = words(display_table_name(table["name"]))
+        named = [(col, v) for col, vs in share_values.items() for v in vs
+                 if mentions(full_question, v, ignore_words)]
+        if named:
+            col, v = named[0]
+            extra_hint += (f"\nЭто доля «{v}» от общего числа — ОДНО число, без GROUP BY: "
+                           f"SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE \"{col}\" = '{v}') / "
+                           f"NULLIF(COUNT(*), 0), 2) AS \"Доля, %\" FROM t\n")
+
     # Утверждённый бизнес-KPI (#57): формула из data/kpi-definitions.json, а не своя.
     # В сравнении периодов не используем: FILTER к составной формуле так не приклеить.
     kpi = None if periods else kp.for_question(full_question, table, catalog.get("schema"))
