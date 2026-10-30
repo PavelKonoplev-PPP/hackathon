@@ -79,6 +79,29 @@ class CheckTests(unittest.TestCase):
                                            .replace("FROM t WHERE", "FROM t"), periods, "Дата"), [])
 
 
+class PeriodColumnsTests(unittest.TestCase):
+    """#97: в сравнении — ровно один показатель за два периода, без % в SQL."""
+    REV = 'SUM("Количество, шт." * "Цена до скидки за единицу, руб." * (1 - "Скидка, %" / 100.0))'
+    AUG = "FILTER (WHERE \"Дата операции (МСК)\" >= '2025-08-01' AND \"Дата операции (МСК)\" < '2025-09-01')"
+    SEP = "FILTER (WHERE \"Дата операции (МСК)\" >= '2025-09-01' AND \"Дата операции (МСК)\" < '2025-10-01')"
+
+    def test_extra_percent_column_rejected(self):
+        periods = parse_periods("сравни август и сентябрь 2025")
+        bad = (f"SELECT 'август 2025' AS \"Год и месяц\", {self.REV} {self.AUG} AS \"Выручка, руб.\", "
+               f"100.0 * {self.REV} {self.AUG} / {self.REV} AS \"Процентное изменение, %\", "
+               f"{self.REV} {self.SEP} AS \"сентябрь 2025\" FROM t")
+        self.assertIn("ровно две колонки", " ".join(check_compare_sql(bad, periods, "Дата операции (МСК)")))
+        mixed = (f"SELECT {self.REV} {self.AUG} AS \"август 2025\", SUM(\"Количество, шт.\") {self.SEP} "
+                 "AS \"сентябрь 2025\" FROM t")
+        self.assertIn("ровно две колонки", " ".join(check_compare_sql(mixed, periods)))
+        good = (f"SELECT {self.REV} {self.AUG} AS \"август 2025\", {self.REV} {self.SEP} "
+                "AS \"сентябрь 2025\" FROM t")
+        self.assertEqual(check_compare_sql(good, periods, "Дата операции (МСК)"), [])
+        by_channel = (f"SELECT \"Канал продажи\", {self.REV} {self.AUG} AS \"август 2025\", "
+                      f"{self.REV} {self.SEP} AS \"сентябрь 2025\" FROM t GROUP BY 1")
+        self.assertEqual(check_compare_sql(by_channel, periods), [])
+
+
 class EnrichTests(unittest.TestCase):
     def test_single_row(self):
         periods = parse_periods("сравни август и сентябрь 2025")

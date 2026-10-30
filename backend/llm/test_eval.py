@@ -259,7 +259,7 @@ class TableChoiceTests(unittest.TestCase):
         values = json.loads(VALUES.read_text(encoding="utf-8"))
         for case in CASES:
             question = (case.get("steps") or [case["question"]])[0]
-            if case["mode"] == "refuse":
+            if case["mode"] == "refuse" or case.get("fresh") is True:
                 question = case["question"]  # в диалоге отказ проверяется на последнем вопросе
             with self.subTest(case=case["id"]):
                 if WRITE_INTENT.search(question):
@@ -293,7 +293,8 @@ class TableChoiceTests(unittest.TestCase):
                 continue
             with self.subTest(case=case["id"]):
                 table = tables[case["table"]]
-                question = " ".join(case.get("steps") or [case["question"]])
+                question = case["steps"][-1] if case.get("fresh") else \
+                    " ".join(case.get("steps") or [case["question"]])
                 intent = Intent.parse(question)
                 sql = adjust_sql(case["gold"], intent)
                 problems = check_sql(

@@ -229,15 +229,84 @@ def whatif_chart(cols: list[str], rows: list[tuple], fmt) -> dict:
 # ---------- прогноз ----------
 
 def forecast_steps(question: str) -> int:
+    """Сколько месяцев после последнего факта («на 6 месяцев», «на полгода», «на год»)."""
     q = question.lower()
-    if re.search(r"год", q):
-        return 12
-    if re.search(r"полгода|полугод", q):
-        return 6
-    m = re.search(r"(\d+)\s*месяц", q)
+    m = re.search(r"(\d+)\s*(мес|месяц)", q)
     if m:
         return max(1, min(24, int(m.group(1))))
-    return 3  # «следующий квартал», «ближайшие месяцы»
+    if re.search(r"полгода|полугод", q):  # раньше «год»: в «полгода» тоже есть «год»
+        return 6
+    if re.search(r"\bгод", q):
+        return 12
+    return 3  # «ближайшие месяцы»
+
+
+MONTHS_GEN = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август",
+              "сентябрь", "октябрь", "ноябрь", "декабрь"]
+NEXT_QUARTER = re.compile(r"следующ\w*\s+(календарн\w*\s+)?квартал", re.IGNORECASE)
+NEXT_YEAR = re.compile(r"следующ\w*\s+(календарн\w*\s+)?год", re.IGNORECASE)
+EXTEND = re.compile(r"продл|продол|расшир|увелич\w*\s+(горизонт|прогноз)|этот\s+прогноз|"
+                    r"тот\s+же\s+прогноз|прогноз\w*\s+(до|на)\s+\d+", re.IGNORECASE)
+
+
+def _month_label(d: dt.date) -> str:
+    return f"{MONTHS_GEN[d.month - 1]} {d.year}"
+
+
+def _months_between(a: dt.date, b: dt.date) -> int:
+    """Сколько шагов по месяцам от a до b (b позже a)."""
+    return (b.year - a.year) * 12 + b.month - a.month
+
+
+def forecast_horizon(question: str, last_fact, today: dt.date | None = None):
+    """(шагов от последнего факта, сколько первых шагов скрыть, пояснение горизонта) — #105.
+
+    «Следующий квартал» — следующий КАЛЕНДАРНЫЙ квартал относительно сегодняшней даты:
+    при последнем факте в сентябре и дате запроса в октябре это январь—март следующего
+    года; промежуточные месяцы считаются (тренд линейный), но в ответ не выводятся.
+    «На N месяцев», «на полгода» — N месяцев после последнего факта, это и пишем."""
+    last = last_fact.date() if isinstance(last_fact, dt.datetime) else last_fact
+    last = dt.date(last.year, last.month, 1)
+    today = today or dt.date.today()
+    calendar = None
+    if NEXT_QUARTER.search(question) and not re.search(r"\d+\s*мес", question, re.IGNORECASE):
+        q_start_month = ((today.month - 1) // 3 + 1) * 3 + 1
+        start = dt.date(today.year + (q_start_month > 12), (q_start_month - 1) % 12 + 1, 1)
+        if start <= last:  # данные уже дальше «сегодня»: квартал после последнего факта
+            m = ((last.month - 1) // 3 + 1) * 3 + 1
+            start = dt.date(last.year + (m > 12), (m - 1) % 12 + 1, 1)
+        quarter = (start.month - 1) // 3 + 1
+        calendar = (start, 3, f"следующий календарный квартал — {quarter} квартал {start.year}")
+    elif NEXT_YEAR.search(question) and not re.search(r"\d+\s*мес", question, re.IGNORECASE):
+        start = dt.date(max(today.year, last.year) + 1, 1, 1)
+        calendar = (start, 12, f"следующий календарный год — {start.year}")
+    if calendar:
+        start, length, label = calendar
+        skip = _months_between(last, start) - 1
+        steps = skip + length
+        if steps > 24:  # слишком далеко от данных — честно сокращаем до ближайших месяцев
+            steps, skip, calendar = 3, 0, None
+        else:
+            end = dt.date(start.year + (start.month + length - 2) // 12,
+                          (start.month + length - 2) % 12 + 1, 1)
+            note = f"{label} ({_month_label(start)} — {_month_label(end)})"
+            if skip:
+                note += (f"; промежуточные месяцы после последнего факта ({_month_label(last)}) "
+                         "рассчитаны по тому же тренду, но в ответ не выводятся")
+            return steps, skip, note
+    steps = forecast_steps(question)
+    first = next_month(last)
+    end = dt.date(first.year + (first.month + steps - 2) // 12, (first.month + steps - 2) % 12 + 1, 1)
+    note = (f"{steps} мес. после последнего факта ({_month_label(last)}): "
+            f"{_month_label(first)} — {_month_label(end)}")
+    return steps, 0, note
+
+
+def is_forecast_extension(question: str) -> bool:
+    """«А теперь продли этот прогноз до 6 месяцев», «а на полгода?» — продолжение прогноза (#99)."""
+    return bool(EXTEND.search(question)) or bool(
+        re.match(r"^\s*(а|и|покажи|сделай|давай|посчитай)\s+(теперь\s+)?(на|до)\s+"
+                 r"(\d+\s*мес\w*|полгода|год|квартал|следующ)", question, re.IGNORECASE))
 
 
 def forecast_base_question(question: str) -> str:

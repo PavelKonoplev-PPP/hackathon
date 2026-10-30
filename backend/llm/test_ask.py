@@ -2,7 +2,9 @@
     python -m unittest discover -s backend -p 'test_*.py' -t .
 """
 import datetime as dt
+import json
 import unittest
+from pathlib import Path
 from decimal import Decimal
 
 from backend.llm.ask import (_SESSIONS, answer_looks_good, answer_question, format_value,
@@ -644,6 +646,106 @@ class AnswerTests(unittest.TestCase):
         self.assertIsNotNone(err7)
         self.assertIn("не найдена в каталоге данных", err7)
 
+
+CATALOG_FILE = Path(__file__).resolve().parents[2] / "data" / "schema-catalog.json"
+VALUES_FILE = CATALOG_FILE.with_name("category-values.json")
+
+
+class E2EFindingsTests(unittest.TestCase):
+    """Регрессии по E2E 29.10.2026: #96, #98, #102, #104."""
+
+    def setUp(self):
+        _SESSIONS.clear()
+
+    def test_share_after_grouping_drops_previous_sql(self):
+        """#96: «А какая доля … на мобильное приложение?» после разбивки — одно число."""
+        runner = FakeRunner(rows=[("Мобильное приложение", 10), ("Интернет-магазин", 5)],
+                            columns=["Канал продажи", "Количество"])
+        grouped = '```sql\nSELECT "Канал продажи", COUNT(*) FROM t GROUP BY 1\n```'
+        ask("Сколько записей о продажах по каждому каналу продажи?", [grouped, "x"], runner, session="s")
+        share = ('```sql\nSELECT 100.0 * COUNT(*) FILTER (WHERE "Канал продажи" = \'Мобильное приложение\') '
+                 '/ NULLIF(COUNT(*), 0) AS "Доля, %" FROM t\n```')
+        runner.rows, runner.columns = [(66.67,)], ["Доля, %"]
+        result, client, trace = ask("А какая доля продаж приходится на мобильное приложение?",
+                                    [share, "x"], runner, session="s")
+        self.assertEqual(len(client.calls[0]), 2)  # без прошлого SQL с GROUP BY
+        self.assertEqual(trace["errors"], [])
+        self.assertEqual(trace["table"], "data_01_Продажи")
+
+    def test_explicit_other_table_breaks_followup(self):
+        """#102: «А сколько всего обращений в таблице demo_support?» — новая таблица."""
+        from backend.llm.ask import explicit_table, points_elsewhere
+        tables = [{"name": "demo_orders", "columns": [{"name": "order_id", "inferred_type": "identifier"}]},
+                  {"name": "demo_support", "columns": [{"name": "ticket_id", "inferred_type": "identifier"}]}]
+        q = "А сколько всего обращений в таблице demo_support?"
+        self.assertEqual(explicit_table(q, tables)["name"], "demo_support")
+        self.assertTrue(points_elsewhere(q, tables, {}, "demo_orders", "public"))
+        self.assertFalse(points_elsewhere("А по месяцам?", tables, {}, "demo_orders", "public"))
+        self.assertFalse(points_elsewhere("А сколько в таблице demo_orders за 2025?", tables, {},
+                                          "demo_orders", "public"))
+        catalog = {"schema": "public", "tables": tables}
+        runner = FakeRunner(rows=[(180,)], columns=["Количество"])
+        ask_ = lambda q, sql, s: answer_question(q, catalog, runner, client=ScriptedClient([sql, "x"]),
+                                                 trace=(t := {}), session_id=s) and t
+        t1 = ask_("Сколько всего заказов в таблице demo_orders?",
+                  '```sql\nSELECT COUNT(*) AS "Количество" FROM t\n```', "d")
+        self.assertEqual(t1["table"], "demo_orders")
+        runner.rows = [(80,)]
+        t2 = ask_(q, '```sql\nSELECT COUNT(*) AS "Количество" FROM t\n```', "d")
+        self.assertEqual(t2["table"], "demo_support")
+        self.assertEqual(t2["errors"], [])
+
+    @unittest.skipUnless(CATALOG_FILE.is_file() and VALUES_FILE.is_file(), "нет каталога")
+    def test_domain_switch_not_forced(self):
+        """#98: после вопросов о техподдержке «Сравни выручку с учётом скидок…» — продажи."""
+        from backend.llm.ask import choose_table, points_elsewhere
+        tables = json.loads(CATALOG_FILE.read_text(encoding="utf-8"))["tables"]
+        values = json.loads(VALUES_FILE.read_text(encoding="utf-8"))
+        q = ("Сравни выручку с учётом скидок за август и сентябрь 2025 года. "
+             "Покажи абсолютное и процентное изменение.")
+        support = "data_02_Техническая_поддержка"
+        self.assertTrue(points_elsewhere(q, tables, values, support, "raw"))
+        self.assertEqual(choose_table(q, tables, values, "raw")[0]["name"], "data_01_Продажи")
+        for keep in ["Сравни с предыдущим месяцем", "А по месяцам?", "Сравни Москву и Казань",
+                     "А только за 2025 год?"]:
+            self.assertFalse(points_elsewhere(keep, tables, values, "data_01_Продажи", "raw"), keep)
+
+    def test_revenue_not_counted_on_table_without_money(self):
+        """#98: «выручка» по таблице без денег — уточнение, а не SUM часов."""
+        catalog = {"tables": [
+            {"name": "data_02_Поддержка", "columns": [
+                {"name": "Норматив решения, ч", "inferred_type": "integer",
+                 "conversion": {"target_type": "integer", "policy": "safe_complete"}}]},
+            {"name": "data_01_Продажи", "columns": [
+                {"name": "Цена, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_complete"}}]}]}
+        scoped = answer_question("Какая выручка?", catalog, FakeRunner(), client=ScriptedClient([]),
+                                 trace={}, table_name="data_02_Поддержка")
+        self.assertIn("нет денежных показателей", scoped["answer"])
+        self.assertIsNone(scoped.get("table"))
+        # пользователь сам выбрал таблицу без денег в ответ на уточнение — предлагаем подходящие
+        _SESSIONS["m"] = {"pending": {"kind": "table", "question": "Какая выручка?",
+                                      "options": ["Поддержка", "Продажи"],
+                                      "tables": ["data_02_Поддержка", "data_01_Продажи"]}}
+        trace = {}
+        result = answer_question("Поддержка", catalog, FakeRunner(), client=ScriptedClient([]),
+                                 trace=trace, session_id="m")
+        self.assertEqual(result["clarification"]["options"], ["Продажи"])
+        self.assertIn("нет денежных показателей", result["answer"])
+
+    def test_multi_metric_text(self):
+        """#104: текст про каждую метрику, валовая прибыль названа валовой."""
+        import datetime as dt
+        from backend.llm.ask import multi_metric_answer, profit_note
+        rows = [(dt.date(2025, 11, 1), 150.0, 40.0), (dt.date(2025, 12, 1), 200.0, 30.0)]
+        text = multi_metric_answer(["Месяц", "Выручка, руб.", "Прибыль, руб."], rows, False)
+        self.assertIn("«Выручка, руб.»: максимум 200 (01.12.2025)", text)
+        self.assertIn("«Прибыль, руб.»: максимум 40 (01.11.2025)", text)
+        self.assertIsNone(multi_metric_answer(["Месяц", "Выручка"], [r[:2] for r in rows], False))
+        note = profit_note(["Месяц", "Прибыль, руб."],
+                           'SELECT SUM(x - "Количество, шт." * "Себестоимость единицы, руб.") FROM t')
+        self.assertIn("валовая", note)
+        self.assertEqual(profit_note(["Месяц", "Выручка"], "SELECT 1"), "")
 
 
 if __name__ == "__main__":

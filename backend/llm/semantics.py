@@ -82,7 +82,12 @@ def mentions(question: str, value: str, ignore: set[str] | None = None) -> bool:
     asked = words(question)
     if ignore:
         asked = {q for q in asked if not any(same_word(q, w) for w in ignore)}
-    return overlap(asked, value_words) > 0
+    if overlap(asked, value_words) > 0:
+        return True
+    # «через чат» ~ «Чат в приложении»: короткое главное слово многословного значения
+    head = re.findall(r"[а-яёa-z0-9]+", value.lower())
+    tokens = re.findall(r"[а-яёa-z0-9]+", question.lower())
+    return len(head) >= 2 and len(head[0]) == 3 and head[0] in tokens
 
 
 # ---------- разбор вопроса ----------
@@ -105,6 +110,13 @@ _GRAINS = [("month", r"по\s+месяц|кажд\w*\s+месяц|помесяч
            ("day", r"по\s+дн(ям|ю)|кажд\w*\s+д(ень|ня)|ежедневн")]
 
 
+_NO_GROUPS = re.compile(r"без\s+(групп?ировк|разбивк|разделени)\w*(\s+по\s+[а-яёa-z]+)?|"
+                        r"одн(им|ой)\s+(числом|процентом|значением|цифрой|долей)|"
+                        r"(общ(ую|ий|ее)|итогов(ую|ый|ое))\s+(долю|процент)", re.IGNORECASE)
+SHARE = re.compile(r"\bдол(я|и|ю|ей|е)\b|какой\s+процент|какая\s+часть|в\s+процентах\s+от|"
+                   r"процент\w*\s+от\s+(общ|всех)", re.IGNORECASE)
+
+
 @dataclass
 class Intent:
     is_count: bool
@@ -114,6 +126,7 @@ class Intent:
     time_grain: str | None
     has_unit: bool
     wants_groups: bool
+    no_groups: bool = False  # «одним числом», «без группировки по каналам» (#96)
 
     @classmethod
     def parse(cls, question: str) -> "Intent":
@@ -122,7 +135,9 @@ class Intent:
         m = _TOP_N.search(q)
         if m:
             top_n = int(next(g for g in m.groups() if g))
-        grain = next((name for name, pattern in _GRAINS if re.search(pattern, q)), None)
+        no_groups = bool(_NO_GROUPS.search(q))
+        q_groups = _NO_GROUPS.sub(" ", q)  # «без группировки по каналам» — не просьба о разбивке
+        grain = next((name for name, pattern in _GRAINS if re.search(pattern, q_groups)), None)
         return cls(
             is_count=bool(re.search(r"\bсколько\b|\bколичеств|\bчисло\b", q)),
             wants_distinct=bool(re.search(r"уникальн|разных|различн", q)),
@@ -130,7 +145,8 @@ class Intent:
             top_n=top_n,
             time_grain=grain,
             has_unit=bool(UNIT_WORDS.search(q)),
-            wants_groups=bool(_GROUPS.search(q)) or grain is not None,
+            wants_groups=not no_groups and (bool(_GROUPS.search(q_groups)) or grain is not None),
+            no_groups=no_groups,
         )
 
 
@@ -319,6 +335,34 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
             + ", ".join(candidates[:4]) + ". Добавь нужное условие в WHERE."]
 
 
+def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
+                 ignore: set[str] | None) -> list[str]:
+    """Доля значения от общего (#96): «доля обращений через чат» — одно число
+    100.0 * COUNT(*) FILTER (WHERE "Канал" = 'Чат') / COUNT(*), без GROUP BY по «Канал»
+    (иначе в каждой группе выходит 0% или 100%) и не COUNT(*)/COUNT(*)."""
+    problems = []
+    group = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
+                      re.IGNORECASE | re.DOTALL)
+    if intent.no_groups and group:
+        problems.append("В вопросе просят одно число без группировки — убери GROUP BY и колонку "
+                        "разбивки из SELECT.")
+    if not SHARE.search(question):
+        return problems
+    if re.search(r"count\s*\(\s*\*\s*\)\s*/\s*(nullif\s*\(\s*)?count\s*\(\s*\*\s*\)", sql,
+                 re.IGNORECASE):
+        problems.append("Доля COUNT(*)/COUNT(*) всегда 100%: в числителе нужен фильтр — "
+                        "COUNT(*) FILTER (WHERE условие), в знаменателе — все строки.")
+    named = [(col, v) for col, vs in (values or {}).items() for v in vs
+             if mentions(question, v, ignore)]
+    for col, v in named:
+        if group and f'"{col}"' in group.group(1) and not intent.wants_groups:
+            problems.append(f"Доля «{v}» от общего — одно число: 100.0 * COUNT(*) FILTER (WHERE "
+                            f"\"{col}\" = '{v}') / NULLIF(COUNT(*), 0) без GROUP BY по \"{col}\" "
+                            "(внутри группы доля всегда 0% или 100%).")
+            break
+    return problems
+
+
 def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
               strict: bool = True, ignore: set[str] | None = None,
               numeric_columns: list[str] | None = None,
@@ -365,6 +409,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if not re.search(r"\bfrom\s+t\b", low):
         problems.append("Запрос должен брать данные из таблицы t.")
 
+    problems += _check_share(sql, question, intent, values, ignore)
     if columns:
         problems += _check_group_by(sql, question, columns, ignore, values, aliases)
         problems += check_money(sql, question, columns)
@@ -648,15 +693,44 @@ def detect_out_of_scope(question: str, catalog: dict | None = None) -> RefusalIn
     for topic, pattern, explanation, suggestions in UNSUPPORTED_METRICS:
         found = list(pattern.finditer(question))
         if found:
-            if covered and all(any(a <= m.start() and m.end() <= b for a, b in covered)
-                               for m in found):
+            uncovered = [m for m in found
+                         if not any(a <= m.start() and m.end() <= b for a, b in covered)]
+            if not uncovered:
                 continue  # этот термин команда сама определила для активного источника
+            if topic == "nps":  # называем именно неопределённые термины из вопроса (#100)
+                explanation = _satisfaction_explanation([m.group(0) for m in uncovered])
             return RefusalInfo(
                 topic=topic,
                 explanation=explanation,
                 suggestions=suggestions,
             )
     return None
+
+
+_SATISFACTION_TERMS = [
+    (r"^(nps|нпс)$|net\s+promoter|готовност", "NPS (индекс готовности рекомендовать)"),
+    (r"^csat$", "CSAT (удовлетворённость клиентов)"),
+    (r"^ces$", "CES (индекс усилий клиента)"),
+    (r"лояльност", "индекса лояльности клиентов (NPS)"),
+    (r"удовлетвор", "удовлетворённости клиентов (CSAT)"),
+]
+
+
+def _satisfaction_explanation(matched: list[str]) -> str:
+    """Отказ называет именно спрошенные термины, а не всегда NPS (#100)."""
+    names = []
+    for text in matched:
+        low = text.lower().strip()
+        name = next((n for p, n in _SATISFACTION_TERMS if re.search(p, low)), text)
+        if name not in names:
+            names.append(name)
+    listed = ", ".join(names) if names else "NPS"
+    text = (f"В данных нет метрики {listed}: опросов удовлетворённости и рекомендаций в "
+            "загруженных таблицах нет.")
+    if any("CSAT" in n for n in names):
+        text += (" Ближайшее, что есть, — «Оценка клиента» в техподдержке. Если под CSAT "
+                 "понимается она, этот термин можно утвердить в бизнес-словаре — тогда я посчитаю.")
+    return text
 
 
 def _glossary_spans(question: str, catalog: dict | None) -> list[tuple[int, int]]:
