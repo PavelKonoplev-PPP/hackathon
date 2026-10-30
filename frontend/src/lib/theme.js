@@ -10,14 +10,17 @@ export function getThemeSetting() {
   }
 }
 
-export function applyTheme(setting) {
+// persist: false — временно (например, на время сборки PDF), без записи в настройки.
+export function applyTheme(setting, { persist = true } = {}) {
   const root = document.documentElement
   if (setting === 'auto') delete root.dataset.theme
   else root.dataset.theme = setting
-  try {
-    localStorage.setItem(KEY, setting)
-  } catch {
-    // без сохранения
+  if (persist) {
+    try {
+      localStorage.setItem(KEY, setting)
+    } catch {
+      // без сохранения
+    }
   }
   window.dispatchEvent(new Event(EVENT))
 }
