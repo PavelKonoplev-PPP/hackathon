@@ -1,6 +1,7 @@
 """Тесты What-if (#56) и прогноза (сценарий 10) — без модели и БД."""
 import datetime as dt
 import unittest
+from unittest import mock
 from decimal import Decimal
 
 from backend.llm.ask import _SESSIONS
@@ -158,12 +159,60 @@ class FlowTests(unittest.TestCase):
         sql = ('```sql\nSELECT date_trunc(\'month\', "Дата") AS "Месяц", SUM("Количество, шт." * '
                '"Цена до скидки за единицу, руб." * (1 - "Скидка, %" / 100.0)) AS "Выручка" '
                'FROM t GROUP BY 1 ORDER BY 1\n```')
-        result, _, trace = ask("Какой прогноз выручки по продажам на следующий квартал?", [sql, "x"], runner)
+        with mock.patch("backend.llm.ask._today", return_value=dt.date(2025, 9, 15)):
+            result, _, trace = ask("Какой прогноз выручки по продажам на следующий квартал?",
+                                   [sql, "x"], runner)
         self.assertEqual([round(v) for v in trace["forecast"]], [200, 210, 220])
         self.assertEqual(result["chart"]["type"], "line")
         self.assertEqual(result["chart"]["categories"][-1], "01.12.2025")
         self.assertEqual(result["table"]["rows"][0], ["01.10.2025", "200"])
         self.assertIn("рост на ", result["answer"])
+
+
+class ForecastHorizonTests(unittest.TestCase):
+    """#105: «следующий квартал» — календарный; #99: продление прогноза в том же диалоге."""
+    SQL = ('```sql\nSELECT date_trunc(\'month\', "Дата") AS "Месяц", SUM("Цена, руб.") AS "Выручка" '
+           'FROM t GROUP BY 1 ORDER BY 1\n```')
+
+    def setUp(self):
+        from backend.llm.ask import _SESSIONS
+        _SESSIONS.clear()
+        months = [(dt.date(2025, 10, 1), Decimal(100))] + [
+            (dt.date(2026, m, 1), Decimal(100 + 10 * m)) for m in range(1, 10)]
+        self.runner = FakeRunner(rows=months, columns=["Месяц", "Выручка"])
+
+    def test_next_calendar_quarter(self):
+        with mock.patch("backend.llm.ask._today", return_value=dt.date(2026, 10, 29)):
+            result, _, trace = ask("Спрогнозируй выручку по продажам на следующий квартал",
+                                   [self.SQL, "x"], self.runner)
+        self.assertEqual([r[0] for r in result["table"]["rows"]],
+                         ["01.01.2027", "01.02.2027", "01.03.2027"])
+        self.assertIn("1 квартал 2027", result["answer"])
+        self.assertIn("промежуточные месяцы", result["answer"])
+        self.assertEqual(result["chart"]["categories"][-1], "01.03.2027")
+
+    def test_extend_forecast_in_same_dialog(self):
+        with mock.patch("backend.llm.ask._today", return_value=dt.date(2026, 10, 29)):
+            ask("Спрогнозируй выручку по продажам на 3 месяца", [self.SQL, "x"], self.runner,
+                session="f1")
+            result, client, trace = ask("А теперь продли этот прогноз до 6 месяцев.", [self.SQL, "x"],
+                                        self.runner, session="f1")
+        self.assertNotIn("clarification", trace)
+        self.assertEqual(trace["table"], "data_01_Продажи")
+        self.assertEqual(len(result["table"]["rows"]), 6)
+        self.assertEqual(result["table"]["rows"][0][0], "01.10.2026")
+        self.assertEqual(result["table"]["rows"][-1][0], "01.03.2027")
+        self.assertIn("октябрь 2026 — март 2027", result["answer"])
+        # «а на полгода?» и другая сессия без прогноза — не продолжение
+        from backend.llm.whatif import is_forecast_extension
+        self.assertTrue(is_forecast_extension("а на полгода?"))
+        self.assertTrue(is_forecast_extension("покажи на 6 мес."))
+
+    def test_extension_needs_previous_forecast(self):
+        from backend.llm.ask import _SESSIONS
+        result, _, trace = ask("А теперь продли этот прогноз до 6 месяцев.", ["x"], self.runner,
+                               session="empty")
+        self.assertIsNone(result.get("table"))
 
 
 if __name__ == "__main__":

@@ -133,7 +133,8 @@ class OutOfScopeTests(unittest.TestCase):
 
         f = GlossaryFile(self, [])  # словарь пуст: не зависим от data/ на машине разработчика
         before = answer_question(q, cat, runner, client=ScriptedClient([]), trace={})
-        self.assertIn("нет метрики NPS", before["answer"])
+        self.assertIn("нет метрики CSAT", before["answer"])  # отказ по спрошенному термину (#100)
+        self.assertNotIn("NPS", before["answer"])
 
         f.write([entry("data_02_Поддержка", "Оценка клиента",
                                   description="Оценка обращения от 1 до 5", synonyms=["CSAT"])])

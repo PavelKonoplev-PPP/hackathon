@@ -36,7 +36,8 @@ from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
                         adjust_sql, check_destructive_mutation, check_money, check_sql,
                         counted_noun, detect_ambiguous_query, detect_out_of_scope,
-                        is_pure_view_request, money_formula, overlap, requested_view,
+                        is_pure_view_request, mentions, money_formula, overlap, requested_view,
+                        SHARE,
                         same_word, strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
@@ -185,8 +186,13 @@ def keyword_scores(question: str, tables: list[dict],
     for t in tables:
         name_words = words(display_table_name(t["name"]))
         col_words = set().union(set(), *(gl.column_words(c) for c in t.get("columns") or []))
-        if money_formula([c["name"] for c in t.get("columns") or []]):
+        names = [c["name"] for c in t.get("columns") or []]
+        if money_formula(names):
             col_words |= {"выручка", "оборот"}  # выручку можно посчитать: количество × цена
+            if any(re.search(r"скидк", n, re.IGNORECASE) for n in names):
+                col_words |= {"скидка", "скидок", "скидками", "скидкой"}  # «с учётом скидок»
+            if any(re.search(r"себестоим", n, re.IGNORECASE) for n in names):
+                col_words |= {"прибыль", "маржа"}  # валовая прибыль = выручка − себестоимость
         values = (values_by_table or {}).get(t["name"]) or {}
         # длинные описательные значения («Недостаточно прав для выполнения операции») шумят
         value_words = set().union(set(), *(words(v) for vs in values.values() for v in vs
@@ -550,6 +556,97 @@ def compare_metric(question: str, table: dict) -> str:
     return "COUNT(*)"
 
 
+def has_money(table: dict) -> bool:
+    """Есть ли в таблице деньги: формула выручки (количество × цена) или колонка в рублях."""
+    names = [c["name"] for c in table.get("columns") or []]
+    return bool(money_formula(names)) or any(
+        re.search(r"руб|₽|выручк|доход", n, re.IGNORECASE) for n in names)
+
+
+def explicit_table(question: str, tables: list[dict]) -> dict | None:
+    """Таблица, прямо названная в вопросе: «в таблице demo_support», «в Технической поддержке»."""
+    low = question.lower().replace("ё", "е")
+    for t in tables:
+        raw = t["name"].lower()
+        display = display_table_name(t["name"]).lower().replace("ё", "е")
+        if re.search(r"(?<![\w])" + re.escape(raw) + r"(?![\w])", low) or (
+                " " in display and display in low):
+            return t
+    return None
+
+
+def points_elsewhere(question: str, tables: list[dict], values_by_table: dict, last_table: str,
+                     schema: str | None) -> bool:
+    """Продолжение («А…», «Сравни…») на самом деле про ДРУГУЮ таблицу (#98, #102):
+    таблица названа явно, или вопрос уверенно (≥2 совпадения с названием/колонками)
+    указывает на другую таблицу, или все подходящие таблицы — не прошлая.
+    Слабые совпадения («Сравни с предыдущим месяцем» ~ «Код предыдущего обращения»,
+    «Сравни Москву и Казань» — только значения) продолжение не прерывают."""
+    named = explicit_table(question, tables)
+    if named is not None:
+        return named["name"] != last_table
+    structural: list[int] = []
+    scores = keyword_scores(question, tables, values_by_table, structural, schema)
+    guess, candidates = choose_table(question, tables, values_by_table, schema)
+    strength = {t["name"]: st for t, st in zip(tables, structural)}
+    if guess is not None:
+        return guess["name"] != last_table and strength.get(guess["name"], 0) >= 2
+    return bool(candidates) and all(c["name"] != last_table for c in candidates) and \
+        max(strength.get(c["name"], 0) for c in candidates) >= 1
+
+
+def _named_values(question: str, runner, table: dict) -> list[str]:
+    """Значения категорий таблицы, названные в вопросе («чат в приложении»)."""
+    try:
+        values = runner.category_values(table) or {}
+    except Exception:
+        return []
+    ignore = words(display_table_name(table["name"]))
+    return [v for vs in values.values() for v in vs if mentions(question, v, ignore)]
+
+
+def multi_metric_answer(columns: list[str], rows: list[tuple], truncated: bool) -> str | None:
+    """Текст про КАЖДЫЙ показатель, если их в результате несколько (#104): максимум и минимум
+    с датой/значением разбивки именно этой метрики. None — показатель один."""
+    if len(rows) < 2:
+        return None
+    numeric = [i for i in range(len(columns))
+               if all(_is_number(r[i]) or r[i] is None for r in rows)
+               and any(_is_number(r[i]) for r in rows)]
+    labels = [i for i in range(len(columns)) if i not in numeric]
+    if len(numeric) < 2 or not labels:
+        return None
+    label = labels[0]
+    is_time = all(isinstance(r[label], (dt.date, dt.datetime)) for r in rows)
+    parts = []
+    for i in numeric:
+        valid = [r for r in rows if r[i] is not None]
+        hi = max(valid, key=lambda r: r[i])
+        lo = min(valid, key=lambda r: r[i])
+        if is_time:
+            parts.append(f"«{columns[i]}»: максимум {format_value(hi[i])} ({format_value(hi[label])}), "
+                         f"минимум {format_value(lo[i])} ({format_value(lo[label])})")
+        else:
+            parts.append(f"«{columns[i]}»: больше всего у «{format_value(hi[label])}» — "
+                         f"{format_value(hi[i])}, меньше всего у «{format_value(lo[label])}» — "
+                         f"{format_value(lo[i])}")
+    span = ""
+    if is_time:
+        ordered = sorted(r[label] for r in rows)
+        span = f"За период с {format_value(ordered[0])} по {format_value(ordered[-1])}: "
+    more = " (показана часть строк)" if truncated else ""
+    return span + "; ".join(parts) + f"{more}. Подробности — в таблице и на графике."
+
+
+def profit_note(columns: list[str], sql: str) -> str:
+    """«Прибыль» = выручка − себестоимость — это валовая прибыль, не чистая (#104)."""
+    if any(re.search(r"прибыл", c, re.IGNORECASE) and not re.search(r"чист", c, re.IGNORECASE)
+           for c in columns) and re.search(r"себестоим", sql, re.IGNORECASE):
+        return (" «Прибыль» здесь — валовая: выручка минус себестоимость, без прочих расходов "
+                "(это не чистая прибыль).")
+    return ""
+
+
 def is_followup(question: str) -> bool:
     """Явное продолжение: «а теперь…», «то же самое…», просьба о виде («по месяцам линией»)."""
     return bool(FOLLOWUP_START.search(question) or FOLLOWUP_WORDS.search(question)
@@ -642,6 +739,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
             state.pop("pending", None)
             state.pop("previous", None)
             state.pop("history", None)
+            state.pop("forecast", None)
         state["datasource_id"] = active_ds
     tables = catalog.get("tables") or []
 
@@ -704,7 +802,8 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
 
 
     # Сценарии «что если» (#56) и прогноз (сценарий 10): база — обычным путём, расчёт — кодом
-    if not _nested and (wi.is_whatif(question) or wi.is_forecast(question)):
+    extends_forecast = bool(state.get("forecast")) and wi.is_forecast_extension(question)
+    if not _nested and (wi.is_whatif(question) or wi.is_forecast(question) or extends_forecast):
         scenario = _scenario_answer(question, catalog, runner, client, say, trace, state,
                                     session_id=session_id, datasource_id=datasource_id,
                                     forced=forced_table)
@@ -740,10 +839,24 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
             # только если вопрос указывает на ту же таблицу: «Какая погода в Москве?» после
             # вопроса о выручке — не уточнение, а вопрос не по данным
             followup = guess is not None and guess["name"] == last["table"]
+        elif followup and not requested_view(question):
+            # «Сравни выручку…» или «А сколько в таблице demo_support?» после вопроса о другой
+            # таблице — новый вопрос, а не продолжение (#98, #102): вопрос сам указывает на
+            # другую таблицу (или на несколько, среди которых нет прошлой)
+            values_by_table = _values_for_all(runner, tables)
+            if points_elsewhere(question, tables, values_by_table, last["table"],
+                                catalog.get("schema")):
+                followup = False
+                say("Вопрос про другие данные — начинаю новый, без контекста прошлого")
         if followup:
-            previous = last
             forced_table = by_name[last["table"]]
-            say(f"Продолжение вопроса: «{last['question']}»")
+            if SHARE.search(question) and _named_values(question, runner, forced_table):
+                # «А какая доля обращений через чат?» после разбивки по каналам: доля от общего —
+                # одно число; прошлую группировку не переносим (#96)
+                say("Доля значения от общего — считаю заново по той же таблице")
+            else:
+                previous = last
+                say(f"Продолжение вопроса: «{last['question']}»")
 
     # 3. Таблица
     if forced_table is not None:
@@ -780,6 +893,26 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
 
     full_question = f"{previous['question']} {question}" if previous else question
     intent = Intent.parse(full_question)
+
+    # Метрика должна быть в таблице до SQL (#98): «выручка» по таблице без денег — не считаем
+    if MONEY.search(full_question) and not has_money(table):
+        money_tables = [t for t in tables if has_money(t)]
+        if not money_tables:
+            return _refuse(f"В таблице «{table_name}» нет денежных показателей — выручку по ней "
+                           "посчитать нельзя. Выберите источник с продажами или ценами.")
+        if money_tables:
+            options = [display_table_name(t["name"]) for t in money_tables]
+            state["pending"] = {"kind": "table", "question": question, "options": options,
+                                "tables": [t["name"] for t in money_tables]}
+            trace["clarification"] = "table"
+            trace.pop("table", None)
+            return {
+                "answer": (f"В таблице «{table_name}» нет денежных показателей, выручку по ней "
+                           "посчитать нельзя. Выручка есть в: "
+                           + ", ".join(f"«{o}»" for o in options) + ". По каким данным считать?"),
+                "chart": None, "table": None, "sql": None,
+                "clarification": {"question": "По каким данным считать?", "options": options},
+            }
 
     # 3. Единица счёта неоднозначна?
     if not previous and not resolved_unit:
@@ -925,17 +1058,23 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
         response["answer"] = template_answer(result.columns, result.rows, result.truncated)
         return response
 
-    say("Объясняю результат")
-    data = result_text(result.columns, result.rows, result.truncated)
-    answer = client_chat(client, [
-        {"role": "system", "content": EXPLAIN_PROMPT},
-        {"role": "user", "content": f"Вопрос: {full_question}\n\nТаблица «{table_name}», "
-                                    f"результат запроса:\n{data}"},
-    ], max_tokens=400).strip()
-    answer = re.sub(r"^(прямой\s+)?ответ\s*:\s*", "", answer, flags=re.IGNORECASE)
-    if not answer_looks_good(answer, result.columns, result.rows):
-        say(f"Ответ модели неудачный — использую шаблон. Модель написала: {answer[:150]!r}")
-        answer = template_answer(result.columns, result.rows, result.truncated)
+    multi = multi_metric_answer(result.columns, result.rows, result.truncated)
+    if multi:
+        # несколько показателей: модель часто пишет только про первый — текст собирает код (#104)
+        answer = multi + profit_note(result.columns, sql)
+    else:
+        say("Объясняю результат")
+        data = result_text(result.columns, result.rows, result.truncated)
+        answer = client_chat(client, [
+            {"role": "system", "content": EXPLAIN_PROMPT},
+            {"role": "user", "content": f"Вопрос: {full_question}\n\nТаблица «{table_name}», "
+                                        f"результат запроса:\n{data}"},
+        ], max_tokens=400).strip()
+        answer = re.sub(r"^(прямой\s+)?ответ\s*:\s*", "", answer, flags=re.IGNORECASE)
+        if not answer_looks_good(answer, result.columns, result.rows):
+            say(f"Ответ модели неудачный — использую шаблон. Модель написала: {answer[:150]!r}")
+            answer = template_answer(result.columns, result.rows, result.truncated)
+        answer += profit_note(result.columns, sql)
     note = missing_note(sql, table)
     if note:
         answer = f"{answer} {note}"
@@ -980,11 +1119,16 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
     """«Что будет, если …» и «прогноз на …». None — обычный путь (не удалось разобрать)."""
     tables = catalog.get("tables") or []
     last = state.get("last")
-    forecast = wi.is_forecast(question)
+    ctx = state.get("forecast")
+    # «А теперь продли этот прогноз до 6 месяцев» — тот же показатель и та же таблица (#99)
+    extend = bool(ctx) and wi.is_forecast_extension(question) and not forced
+    forecast = wi.is_forecast(question) or extend
     base_text, _ = wi.split_question(question)
 
     # таблица: продолжение прошлого вопроса («а если скидка вырастет?») или выбор по вопросу
     table = forced  # таблица, выбранная пользователем в ответ на уточнение
+    if extend:
+        table = next((t for t in tables if t["name"] == ctx["table"]), None)
     if table is None and last and not words(base_text) and not forecast:
         table = next((t for t in tables if t["name"] == last["table"]), None)
     if table is None:
@@ -995,7 +1139,10 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
     columns = [c["name"] for c in table.get("columns") or []]
     one_table = {**catalog, "tables": [table]}
 
-    if forecast:
+    if extend and table is not None:
+        base_q = ctx["base_question"]
+        say(f"Продолжение прогноза: «{base_q}»")
+    elif forecast:
         base_q = wi.forecast_base_question(question)
     elif last and not words(base_text) and last["table"] == table["name"]:
         base_q = last["question"]
@@ -1013,7 +1160,11 @@ def _scenario_answer(question: str, catalog: dict, runner, client, say, trace: d
     table_name = display_table_name(table["name"])
 
     if forecast:
-        return _forecast_response(question, sql, cols, rows, table_name, trace)
+        response = _forecast_response(question, sql, cols, rows, table_name, trace)
+        if response.get("table"):
+            state["forecast"] = {"table": table["name"], "base_question": base_q}
+            response["table_name"] = table["name"]
+        return response
 
     change = wi.parse_change(question)
     _, condition = wi.split_question(question)
@@ -1061,27 +1212,30 @@ def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tupl
     if len(series) < 6:
         return _refuse("Для прогноза нужен помесячный ряд хотя бы из 6 точек — "
                        "в данных его не получилось построить.", refused=False)
-    steps = wi.forecast_steps(question)
-    projected = adv.linear_extrapolation([v for _, v in series], steps)
-    months = []
+    steps, skip, horizon = wi.forecast_horizon(question, series[-1][0], _today())
+    path = adv.linear_extrapolation([v for _, v in series], steps)
+    path_months = []
     d = series[-1][0]
     for _ in range(steps):
         d = wi.next_month(d)
-        months.append(d)
+        path_months.append(d)
+    # выводим запрошенный горизонт; промежуточные месяцы до него — только на графике (#105)
+    projected, months = path[skip:], path_months[skip:]
+    trace["horizon"] = horizon
     metric = cols[-1]
     last_label, last_value = format_value(series[-1][0]), series[-1][1]
     change = (projected[-1] - last_value) / abs(last_value) * 100 if last_value else 0.0
     trend = "рост" if projected[-1] > last_value else "снижение"
     change_txt = f"на {abs(change):.1f}%".replace(".", ",")
     money = lambda v: format_value(Decimal(str(round(v, 2))))  # noqa: E731
-    answer = (f"Прогноз «{metric}» на {steps} мес. по линейному тренду за {len(series)} мес.: "
-              f"{', '.join(money(v) for v in projected)}. "
+    answer = (f"Прогноз «{metric}» по линейному тренду за {len(series)} мес. Горизонт: {horizon}. "
+              f"По месяцам: {', '.join(f'{format_value(m)} — {money(v)}' for m, v in zip(months, projected))}. "
               f"К {format_value(months[-1])} — {trend} {change_txt} к последнему факту "
               f"({last_label}: {money(last_value)}). "
               "Тренд не учитывает сезонность и внешние события.")
-    categories = [format_value(m) for m, _ in series] + [format_value(m) for m in months]
+    categories = [format_value(m) for m, _ in series] + [format_value(m) for m in path_months]
     fact = [v for _, v in series] + [None] * steps
-    forecast = [None] * (len(series) - 1) + [series[-1][1]] + [round(v, 2) for v in projected]
+    forecast = [None] * (len(series) - 1) + [series[-1][1]] + [round(v, 2) for v in path]
     trace.update(rows=[(m, v) for m, v in series], forecast=projected)
     return {
         "answer": answer,
@@ -1093,6 +1247,11 @@ def _forecast_response(question: str, sql: str, cols: list[str], rows: list[tupl
                   "y_label": metric, "categories": categories,
                   "series": [{"name": "Факт", "data": fact}, {"name": "Прогноз", "data": forecast}]},
     }
+
+
+def _today() -> dt.date:
+    """Дата запроса (в тестах подменяется) — от неё считается «следующий квартал»."""
+    return dt.date.today()
 
 
 def _format_change(column: str, value) -> str:

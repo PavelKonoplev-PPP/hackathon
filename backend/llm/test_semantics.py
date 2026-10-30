@@ -168,6 +168,7 @@ class UnsupportedMetricsTests(unittest.TestCase):
             "Посчитай индекс лояльности",
             "Какой показатель NPS за прошлый месяц?",
             "Оценка готовности рекомендовать",
+            "Какой NPS и CSAT по каналам?",
         ]:
             info = detect_out_of_scope(phrase)
             self.assertIsNotNone(info, f"Failed on {phrase}")
@@ -413,6 +414,63 @@ class HoldoutFindingsTests(unittest.TestCase):
         self.assertEqual(check_sql(sql, q4, Intent.parse(q4), {}, ignore=ignore, columns=cols), [])
 
 
+
+class SatisfactionRefusalTests(unittest.TestCase):
+    """#100: отказ называет спрошенный термин, а не всегда NPS."""
+
+    def test_named_term(self):
+        from backend.llm.semantics import detect_out_of_scope
+        csat = detect_out_of_scope("Какой средний CSAT по каналам обращения?")
+        self.assertIn("CSAT", csat.explanation)
+        self.assertNotIn("NPS", csat.explanation)
+        self.assertIn("Оценка клиента", csat.explanation)
+        both = detect_out_of_scope("Какой NPS и CSAT?").explanation
+        self.assertIn("NPS", both)
+        self.assertIn("CSAT", both)
+        ces = detect_out_of_scope("Какой CES у клиентов?").explanation
+        self.assertIn("CES", ces)
+        self.assertNotIn("NPS", ces)
+
+
+class ShareTests(unittest.TestCase):
+    """#96: доля значения от общего — одно число, не 100% по группам."""
+    VALUES = {"Канал обращения": ["Телефон", "Форма на сайте", "Чат в приложении", "Электронная почта"]}
+
+    def check(self, question, sql):
+        from backend.llm.semantics import Intent, check_sql
+        return " ".join(check_sql(sql, question, Intent.parse(question), self.VALUES,
+                                  columns=["Канал обращения"]))
+
+    def test_share_of_value(self):
+        q = "А какая доля обращений приходится на чат в приложении?"
+        grouped = ('SELECT "Канал обращения", 100.0 * COUNT(*) FILTER (WHERE "Канал обращения" = '
+                   '\'Чат в приложении\') / COUNT(*) FROM t GROUP BY "Канал обращения"')
+        self.assertIn("без GROUP BY", self.check(q, grouped))
+        self.assertIn("COUNT(*)/COUNT(*)", self.check(
+            q, 'SELECT "Канал обращения", 100.0 * COUNT(*) / COUNT(*) FROM t GROUP BY 1'))
+        good = ('SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE "Канал обращения" = \'Чат в приложении\') '
+                '/ NULLIF(COUNT(*), 0), 2) AS "Доля, %" FROM t')
+        self.assertEqual(self.check(q, good), "")
+
+    def test_refinement_without_grouping(self):
+        from backend.llm.semantics import Intent
+        q = ("Нет, мне нужна доля обращений через чат от общего количества всех обращений. "
+             "Посчитай одним процентом, без группировки по каналам.")
+        intent = Intent.parse(q)
+        self.assertTrue(intent.no_groups)
+        self.assertFalse(intent.wants_groups)
+        self.assertIn("без группировки", self.check(
+            q, 'SELECT "Канал обращения", 100.0 * COUNT(*) FILTER (WHERE "Канал обращения" = '
+               '\'Чат в приложении\') / COUNT(*) FROM t GROUP BY 1'))
+        self.assertEqual(self.check(q, 'SELECT 100.0 * COUNT(*) FILTER (WHERE "Канал обращения" = '
+                                       '\'Чат в приложении\') / NULLIF(COUNT(*), 0) FROM t'), "")
+
+    def test_share_by_group_still_allowed(self):
+        q = "Какая доля обращений через чат в каждом городе?"
+        sql = ('SELECT "Город", 100.0 * COUNT(*) FILTER (WHERE "Канал обращения" = \'Чат в приложении\') '
+               '/ COUNT(*) FROM t GROUP BY "Город"')
+        self.assertEqual(self.check(q, sql), "")
+
+
 if __name__ == "__main__":
     unittest.main()
-

@@ -155,7 +155,36 @@ def check_compare_sql(sql: str, periods: list[Period], date_column: str | None =
             problems.append(f"Нужен отдельный показатель за {p.label}: FILTER (WHERE дата >= "
                             f"'{p.start.isoformat()}' AND дата < '{p.end.isoformat()}') "
                             f"AS \"{p.label}\".")
+    problems += _check_period_columns(sql)
     return problems
+
+
+def _strip_filter(item: str) -> str:
+    """Выражение без «FILTER (…)» (скобки внутри названий колонок учитываются)."""
+    m = re.search(r"\bfilter\s*\(", item, re.IGNORECASE)
+    if not m:
+        return item
+    depth, i = 1, m.end()
+    while i < len(item) and depth:
+        depth += {"(": 1, ")": -1}.get(item[i], 0)
+        i += 1
+    return (item[:m.start()] + item[i:]).strip()
+
+
+def _check_period_columns(sql: str) -> list[str]:
+    """#97: ровно два показателя — один и тот же за каждый период через FILTER; никаких
+    процентов, долей и изменений в SQL (их считает код, иначе сравниваются % с рублями)."""
+    from .kpis import _AGGREGATE, _norm, select_items
+    aggregates = [it for it in select_items(sql) if _AGGREGATE.search(it)]
+    if not aggregates:
+        return []
+    without_period = [it for it in aggregates if not re.search(r"\bfilter\s*\(", it, re.IGNORECASE)]
+    bases = {_norm(_strip_filter(it)) for it in aggregates}
+    if without_period or len(aggregates) != 2 or len(bases) != 1:
+        return ["Для сравнения верни ровно две колонки — один и тот же показатель за каждый период "
+                "через FILTER (с псевдонимами-периодами). Не добавляй проценты, доли и изменения: "
+                "их считает код."]
+    return []
 
 
 def choose_date_column(table: dict, question: str, kinds: dict[str, str]) -> str | None:
