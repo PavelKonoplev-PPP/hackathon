@@ -486,6 +486,7 @@ class ExtraConditionTests(unittest.TestCase):
                '(SELECT "Код покупателя" FROM t WHERE "Уровень программы лояльности" = '
                '\'Без карты лояльности\')')
         self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values)))
+        self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values, strict=False)))
         good = 'SELECT COUNT(*) FROM t WHERE "Уровень программы лояльности" = \'Без карты лояльности\''
         self.assertEqual(check_sql(good, q, Intent.parse(q), values), [])
         q2 = "Сколько обращений без даты закрытия?"
