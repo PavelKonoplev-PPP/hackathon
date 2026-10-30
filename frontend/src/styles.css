@@ -482,3 +482,8 @@ code { font-size: 13px; padding: 1px 5px; border-radius: 4px; background: var(--
 .split-title { flex: 1; min-width: 0; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .split .chart { height: 260px; }
 .split-fill .chart { height: auto; }
+
+/* Остановленный ответ и кнопка «Остановить» */
+.bubble-stopped { color: var(--muted); border-style: dashed; }
+.composer .stop-btn { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+.composer .stop-btn:hover { border-color: var(--error); color: var(--error); }
