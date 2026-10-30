@@ -1,4 +1,5 @@
 // Виды отображения результата и распознавание просьбы «покажи иначе».
+import { dateRange } from './format.js'
 
 export const VIEWS = [
   { id: 'bar', label: 'Гистограмма' },
@@ -78,3 +79,50 @@ export function detectSplitRequest(text = '') {
 export function splitChart(chart) {
   return chart.series.map((s) => ({ ...chart, title: s.name, y_label: s.name, series: [s] }))
 }
+
+// Объединение графиков из разных ответов: общая ось X (даты сравниваются как даты), серии рядом.
+const catKey = (c) => dateRange(c)?.start ?? String(c)
+
+export function mergeProblem(a, b) {
+  if (!a || !b) return 'нет графика'
+  const keys = new Set(a.categories.map(catKey))
+  if (!b.categories.some((c) => keys.has(catKey(c)))) return 'нет общих значений по оси X'
+  return null
+}
+
+export function mergeCharts(a, b) {
+  const order = []
+  const label = new Map()
+  for (const c of [...a.categories, ...b.categories]) {
+    const k = catKey(c)
+    if (!label.has(k)) {
+      label.set(k, c)
+      order.push(k)
+    }
+  }
+  if (order.every((k) => /^\d{4}-\d{2}-\d{2}$/.test(k))) order.sort()
+  const align = (chart, s) => {
+    const byKey = new Map(chart.categories.map((c, i) => [catKey(c), s.data[i]]))
+    return order.map((k) => (byKey.has(k) ? byKey.get(k) : null))
+  }
+  const used = new Set()
+  const unique = (name) => {
+    let n = name
+    for (let i = 2; used.has(n); i++) n = `${name} (${i})`
+    used.add(n)
+    return n
+  }
+  return {
+    type: a.type === 'pie' ? 'bar' : a.type,
+    title: '',
+    x_label: a.x_label || b.x_label,
+    categories: order.map((k) => label.get(k)),
+    series: [
+      ...a.series.map((s) => ({ name: unique(s.name), data: align(a, s) })),
+      ...b.series.map((s) => ({ name: unique(s.name), data: align(b, s) })),
+    ],
+  }
+}
+
+// «Объедини последние графики», «совмести два графика», «наложи графики».
+export const detectMergeRequest = (text = '') => /^\s*(объедини|совмести|наложи)/i.test(text)

@@ -3,9 +3,13 @@ import ResultView from './ResultView.jsx'
 import AddToDashboard from './AddToDashboard.jsx'
 import SaveQueryButton from './SaveQueryButton.jsx'
 import StepsView, { formatMs } from './StepsView.jsx'
+import PickMenu from './PickMenu.jsx'
 import { detectSplitRequest } from '../lib/chartViews.js'
+import { useCategoryColumns } from '../lib/schemaCache.js'
 
-export default function Message({ msg, question, askedText = '', datasourceId, tableName, onPickOption, onChangeView, onPatch }) {
+const hasResultCheck = (m) => !m.error && Boolean(m.chart || m.table)
+
+export default function Message({ msg, question, askedText = '', datasourceId, tableName, mergeOptions = [], onMerge, onSplitBy, busy = false, onPickOption, onChangeView, onPatch }) {
   const [showSql, setShowSql] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = Array.isArray(msg.steps) ? msg.steps : []
@@ -14,10 +18,14 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
   const title = question || msg.chart?.title || 'Результат'
   // Отдельные графики: выбор пользователя, иначе — по формулировке вопроса («график X и график Y»).
   const split = msg.split ?? detectSplitRequest(askedText || question)
+  // «Разбить по…»: признаки таблицы, по которой построен ответ, кроме уже использованных на графике.
+  const categoryColumns = useCategoryColumns(hasResultCheck(msg) ? msg.tableName : null)
+  const used = new Set([msg.chart?.x_label, ...(msg.table?.columns || []), ...(msg.chart?.series || []).map((s) => s.name)].filter(Boolean))
+  const splitColumns = msg.chart ? categoryColumns.filter((c) => !used.has(c)) : []
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
-      <div className={`bubble ${msg.error ? 'bubble-error' : ''} ${hasResult ? 'bubble-wide' : ''}`}>
+      <div className={`bubble ${msg.error ? 'bubble-error' : ''} ${msg.stopped ? 'bubble-stopped' : ''} ${hasResult ? 'bubble-wide' : ''}`}>
         <p className="text">{msg.text}</p>
 
         {hasResult && (
@@ -67,6 +75,22 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
             )}
             {hasResult && msg.sql && (
               <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName: msg.tableName || tableName }} />
+            )}
+            {msg.chart && onMerge && mergeOptions.length > 0 && (
+              <PickMenu
+                label="Объединить с…"
+                heading="Показать на одном графике с"
+                items={mergeOptions}
+                onPick={(o) => onMerge(msg.id, o.key)}
+              />
+            )}
+            {splitColumns.length > 0 && onSplitBy && !busy && (
+              <PickMenu
+                label="Разбить по…"
+                heading="Разбить по признаку"
+                items={splitColumns.map((c) => ({ key: c, label: c }))}
+                onPick={(o) => onSplitBy(msg.id, o.key)}
+              />
             )}
             {steps.length > 0 && (
               <button className="link" onClick={() => setShowSteps((v) => !v)}>

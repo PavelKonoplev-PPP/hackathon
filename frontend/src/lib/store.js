@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { sendMessage } from './api.js'
-import { detectViewRequest, pieProblem, viewPhrase } from './chartViews.js'
-import { createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
+import { abortable, sendMessage } from './api.js'
+import { detectMergeRequest, detectViewRequest, mergeCharts, mergeProblem, pieProblem, viewPhrase } from './chartViews.js'
+import { askedTextFor, createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
 import { dashboardHref } from './router.js'
 import { queriesApi } from './queriesApi.js'
 
@@ -50,6 +50,7 @@ export function useConversations({ onDashboardCreated } = {}) {
   const [progress, setProgress] = useState({}) // этап выполнения по диалогам (BI-07)
   const stateRef = useRef(state)
   const loadingRef = useRef(new Set())
+  const controllers = useRef(new Map()) // «Остановить»: AbortController текущего запроса по диалогам
   stateRef.current = state
 
   useEffect(() => {
@@ -128,6 +129,15 @@ export function useConversations({ onDashboardCreated } = {}) {
     const userMsg = { id: uuid(), role: 'user', text: message }
 
     // «Покажи то же самое кругом»: меняем вид последнего результата локально, без запроса к бэкенду.
+    // «Объедини последние графики»: два последних графика диалога — на одном, локально.
+    if (detectMergeRequest(message)) {
+      const charts = conv.messages.filter((m) => m.role === 'assistant' && !m.error && m.chart)
+      if (charts.length >= 2) {
+        mergeResults(id, charts[charts.length - 2].id, charts[charts.length - 1].id, message)
+        return
+      }
+    }
+
     const wantedView = detectViewRequest(message)
     const source = wantedView && [...conv.messages].reverse().find((m) => m.chart)
     if (source) {
@@ -217,23 +227,83 @@ export function useConversations({ onDashboardCreated } = {}) {
   const withTitle = (c, text) => (c.messages.length === 0 && c.title === NEW_TITLE ? makeTitle(text) : c.title)
 
   // Вопрос агенту: этапы выполнения приходят в progress, ответ — в тот же диалог.
-  async function askAgent(conv, message, userMsg) {
+  const stoppedMsg = () => ({
+    id: uuid(),
+    role: 'assistant',
+    stopped: true,
+    text: 'Ответ остановлен. Можно задать вопрос заново или переформулировать его.',
+  })
+
+  // Вопрос агенту: этапы выполнения приходят в progress, ответ — в тот же диалог.
+  // sessionId/tableName можно переопределить (например, для «Разбить по…» — отдельный вопрос без контекста).
+  async function askAgent(conv, message, userMsg, { sessionId, tableName } = {}) {
     const id = conv.id
-    update(id, (c) => ({ ...c, title: withTitle(c, message), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
+    update(id, (c) => ({ ...c, title: withTitle(c, userMsg.text), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
     startLoading(id)
+    const ctrl = new AbortController()
+    controllers.current.set(id, ctrl)
     let botMsg
     try {
-      const reply = await sendMessage(conv.sessionId, message, {
+      const reply = await sendMessage(sessionId || conv.sessionId, message, {
         datasourceId: conv.datasourceId,
-        tableName: conv.tableName,
+        tableName: tableName ?? conv.tableName,
         onProgress: (p) => setProgress((s) => ({ ...s, [id]: p })),
+        signal: ctrl.signal,
       })
       botMsg = botFromResult(reply)
     } catch (e) {
-      botMsg = { id: uuid(), role: 'assistant', error: true, text: `Не удалось получить ответ: ${e.message}` }
+      botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось получить ответ: ${e.message}` }
+    } finally {
+      controllers.current.delete(id)
     }
     update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
     stopLoading(id)
+  }
+
+  // «Остановить»: перестаём ждать ответ этого диалога.
+  const stop = (id) => controllers.current.get(id)?.abort()
+
+  // Два графика из разных ответов — на одном (общая ось X). Разделить обратно — «Отдельные графики».
+  function mergeResults(convId, msgIdA, msgIdB, commandText) {
+    const conv = stateRef.current.conversations.find((c) => c.id === convId)
+    if (!conv) return
+    const ia = conv.messages.findIndex((m) => m.id === msgIdA)
+    const ib = conv.messages.findIndex((m) => m.id === msgIdB)
+    const a = conv.messages[ia]
+    const b = conv.messages[ib]
+    const titleA = askedTextFor(conv.messages, ia) || a?.chart?.title || 'график 1'
+    const titleB = askedTextFor(conv.messages, ib) || b?.chart?.title || 'график 2'
+    const userMsg = { id: uuid(), role: 'user', text: commandText || `Объединить «${titleA}» и «${titleB}»` }
+    const problem = mergeProblem(a?.chart, b?.chart)
+    const reply = problem
+      ? { id: uuid(), role: 'assistant', text: `Эти графики нельзя объединить: ${problem}. Объединяются графики с общей осью — например, оба по месяцам или оба по каналам.` }
+      : (() => {
+          const chart = mergeCharts(a.chart, b.chart)
+          return {
+            id: uuid(),
+            role: 'assistant',
+            text: `Объединил на одном графике: ${chart.series.map((s) => `«${s.name}»`).join(', ')}. Разделить обратно — кнопка «Отдельные графики».`,
+            chart,
+            table: null,
+            view: chart.type,
+            split: false,
+            merged: true,
+          }
+        })()
+    update(convId, (c) => ({ ...c, messages: [...c.messages, userMsg, reply], updatedAt: Date.now() }))
+  }
+
+  // «Разбить по признаку»: тот же вопрос с разбивкой — отдельной сессией агента, чтобы механизм
+  // уточнений не сохранил прежнюю группировку. Ответ — в этот же диалог.
+  async function splitBy(convId, msgId, column) {
+    const conv = stateRef.current.conversations.find((c) => c.id === convId)
+    if (!conv || loadingRef.current.has(convId)) return
+    const idx = conv.messages.findIndex((m) => m.id === msgId)
+    const msg = conv.messages[idx]
+    if (!msg) return
+    const asked = (askedTextFor(conv.messages, idx) || msg.chart?.title || '').replace(/[?.!\s]+$/, '')
+    const question = `${asked}. В разбивке по «${column}»`
+    await askAgent(conv, question, { id: uuid(), role: 'user', text: `${asked} — в разбивке по «${column}»` }, { sessionId: uuid(), tableName: msg.tableName })
   }
 
   // Новый диалог по выбранной таблице (например, после загрузки CSV) с первым вопросом.
@@ -255,15 +325,19 @@ export function useConversations({ onDashboardCreated } = {}) {
     update(id, (c) => ({ ...c, title: withTitle(c, query.title), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
     startLoading(id)
     setProgress((s) => ({ ...s, [id]: { step: 'Выполнение сохранённого запроса' } }))
+    const ctrl = new AbortController()
+    controllers.current.set(id, ctrl)
     let botMsg
     try {
-      const r = await queriesApi.execute(query.id)
+      const r = await abortable(queriesApi.execute(query.id), ctrl.signal)
       botMsg = botFromResult(r.result, {
         view: query.chart_config?.type || null,
         executionMs: r.execution_time_ms ?? r.result?.execution_time_ms,
       })
     } catch (e) {
-      botMsg = { id: uuid(), role: 'assistant', error: true, text: `Не удалось выполнить сохранённый запрос: ${e.message}` }
+      botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось выполнить сохранённый запрос: ${e.message}` }
+    } finally {
+      controllers.current.delete(id)
     }
     update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
     stopLoading(id)
@@ -284,6 +358,9 @@ export function useConversations({ onDashboardCreated } = {}) {
     buildDashboard,
     setDatasource,
     patchMessage,
+    stop,
+    mergeResults,
+    splitBy,
     startConversation,
     clearTable,
     runSavedQuery,

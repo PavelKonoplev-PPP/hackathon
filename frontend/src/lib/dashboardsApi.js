@@ -101,12 +101,12 @@ export function questionFor(messages, index) {
 }
 
 // Весь текст запроса к ответу: вопрос и уточнения после него («Выведи график X и график Y» → «Продажи»).
-// Идём назад до предыдущего ответа с результатом.
+// Идём назад до предыдущего ответа, который не был уточняющим вопросом (результат, ошибка, остановка).
 export function askedTextFor(messages, index) {
   const parts = []
   for (let i = index - 1; i >= 0; i--) {
     const m = messages[i]
-    if (m.role === 'assistant' && (m.chart || m.table)) break
+    if (m.role === 'assistant' && !m.clarification) break
     if (m.role === 'user' && !detectViewRequest(m.text)) parts.unshift(m.text)
   }
   return parts.join(' ')

@@ -10,6 +10,29 @@ export const MAX_CSV_BYTES = 100 * 1024 * 1024
 
 const UNAVAILABLE = 'сервер недоступен, проверьте, что бэкенд запущен'
 
+export function abortError() {
+  const e = new Error('Ответ остановлен')
+  e.name = 'AbortError'
+  return e
+}
+
+// Ожидание, которое прерывается кнопкой «Остановить».
+const pause = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(abortError())
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => {
+      clearTimeout(t)
+      reject(abortError())
+    }, { once: true })
+  })
+
+// Любой промис, который можно бросить по кнопке «Остановить» (сам запрос на сервере доработает).
+export function abortable(promise, signal) {
+  if (!signal) return promise
+  return Promise.race([promise, pause(2 ** 31 - 1, signal)])
+}
+
 // Запрос к API с понятными ошибками: текст detail от бэкенда или «сервер недоступен».
 export async function request(path, options = {}) {
   const isForm = options.body instanceof FormData
@@ -19,7 +42,8 @@ export async function request(path, options = {}) {
       ...options,
       headers: isForm ? options.headers : { 'Content-Type': 'application/json', ...(options.headers || {}) },
     })
-  } catch {
+  } catch (e) {
+    if (e?.name === 'AbortError') throw abortError()
     throw new Error(UNAVAILABLE)
   }
   if (!res.ok) {
@@ -38,7 +62,6 @@ export async function request(path, options = {}) {
   return res.status === 204 ? null : res.json()
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const chatBody = (sessionId, message, datasourceId, tableName) =>
   JSON.stringify({
@@ -50,23 +73,24 @@ const chatBody = (sessionId, message, datasourceId, tableName) =>
 
 // Вопрос агенту (BI-07): ставим задачу /api/chat/jobs и опрашиваем статус, передавая этапы в onProgress.
 // Если бэкенд без задач (404/405) — обычный POST /api/chat.
-export async function sendMessage(sessionId, message, { datasourceId = null, tableName = null, onProgress } = {}) {
+// signal — кнопка «Остановить»: перестаём ждать ответ (отмены задачи на сервере нет, она доработает сама).
+export async function sendMessage(sessionId, message, { datasourceId = null, tableName = null, onProgress, signal } = {}) {
   if (USE_MOCK) {
     const { mockReply } = await import('./mock.js')
-    return mockReply(message, onProgress)
+    return abortable(mockReply(message, onProgress), signal)
   }
   const body = chatBody(sessionId, message, datasourceId, tableName)
   let job
   try {
-    job = await request('/chat/jobs', { method: 'POST', body })
+    job = await request('/chat/jobs', { method: 'POST', body, signal })
   } catch (e) {
-    if (e.status === 404 || e.status === 405) return request('/chat', { method: 'POST', body })
+    if (e.status === 404 || e.status === 405) return request('/chat', { method: 'POST', body, signal })
     throw e
   }
   const started = Date.now()
   for (let i = 0; ; i++) {
-    await sleep(i === 0 ? 250 : POLL_MS) // первый опрос быстрее: короткие ответы приходят сразу
-    const st = await request(`/chat/jobs/${encodeURIComponent(job.job_id)}`)
+    await pause(i === 0 ? 250 : POLL_MS, signal) // первый опрос быстрее: короткие ответы приходят сразу
+    const st = await request(`/chat/jobs/${encodeURIComponent(job.job_id)}`, { signal })
     onProgress?.({ step: st.current_step, pct: st.progress_pct, steps: st.steps })
     if (st.status === 'completed' && st.result) {
       return { ...st.result, execution_time_ms: st.result.execution_time_ms ?? st.execution_time_ms }

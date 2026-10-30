@@ -93,6 +93,9 @@ export default function App() {
     buildDashboard,
     setDatasource,
     patchMessage,
+    stop,
+    mergeResults,
+    splitBy,
     startConversation,
     clearTable,
     runSavedQuery,
@@ -221,6 +224,9 @@ export default function App() {
                 onSend={send}
                 onChangeView={setView}
                 onPatchMessage={patchMessage}
+                onStop={stop}
+                onMerge={mergeResults}
+                onSplitBy={splitBy}
                 onBuildDashboard={onBuildDashboard}
                 onChangeDatasource={onChangeDatasource}
                 onClearTable={clearTable}

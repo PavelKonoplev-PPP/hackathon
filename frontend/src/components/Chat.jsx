@@ -2,6 +2,7 @@ import { useContext, useEffect, useRef, useState } from 'react'
 import Message from './Message.jsx'
 import { AppContext } from '../lib/appContext.js'
 import { askedTextFor, questionFor } from '../lib/dashboardsApi.js'
+import { mergeProblem } from '../lib/chartViews.js'
 
 const SUGGESTIONS = [
   'Опиши данные',
@@ -9,7 +10,7 @@ const SUGGESTIONS = [
   'Динамика продаж по месяцам',
 ]
 
-export default function Chat({ conversation, loading, progress, onSend, onChangeView, onPatchMessage, onBuildDashboard, onChangeDatasource, onClearTable }) {
+export default function Chat({ conversation, loading, progress, onSend, onStop, onMerge, onSplitBy, onChangeView, onPatchMessage, onBuildDashboard, onChangeDatasource, onClearTable }) {
   const { datasources } = useContext(AppContext)
   const [input, setInput] = useState('')
   const [building, setBuilding] = useState(false)
@@ -47,6 +48,15 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
   }
 
   const empty = conversation.messages.length === 0
+  // Графики этого диалога — кандидаты для «Объединить с…».
+  const chartResults = conversation.messages
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => m.role === 'assistant' && !m.error && m.chart)
+    .map(({ m, i }) => ({ id: m.id, chart: m.chart, title: askedTextFor(conversation.messages, i) || m.chart.title || 'График' }))
+  const mergeOptionsFor = (msg) =>
+    chartResults
+      .filter((r) => r.id !== msg.id)
+      .map((r) => ({ key: r.id, label: r.title, reason: mergeProblem(msg.chart, r.chart) }))
   const resultCount = conversation.messages.filter((m) => m.role === 'assistant' && !m.error && (m.chart || m.table)).length
 
   return (
@@ -115,6 +125,10 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
               onPickOption={send}
               onChangeView={(msgId, view) => onChangeView(conversation.id, msgId, view)}
               onPatch={onPatchMessage ? (msgId, patch) => onPatchMessage(conversation.id, msgId, patch) : undefined}
+              mergeOptions={m.chart ? mergeOptionsFor(m) : []}
+              onMerge={onMerge ? (a, b) => onMerge(conversation.id, a, b) : undefined}
+              onSplitBy={onSplitBy ? (msgId, col) => onSplitBy(conversation.id, msgId, col) : undefined}
+              busy={loading}
             />
           )
         })}
@@ -153,9 +167,15 @@ export default function Chat({ conversation, loading, progress, onSend, onChange
           aria-label="Вопрос к данным"
           rows={1}
         />
-        <button type="submit" disabled={loading || !input.trim()}>
-          Отправить
-        </button>
+        {loading ? (
+          <button type="button" className="stop-btn" onClick={() => onStop(conversation.id)} title="Перестать ждать ответ">
+            Остановить
+          </button>
+        ) : (
+          <button type="submit" disabled={!input.trim()}>
+            Отправить
+          </button>
+        )}
       </form>
     </div>
   )
