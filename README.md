@@ -7,6 +7,14 @@
 
 Кейс: «AI-Native BI Система» (ИАЦ). Данные кейса — 9 CSV, около 5,4 млн строк.
 
+## Документы для проверки
+
+| Файл | Что внутри |
+|---|---|
+| [Architecture.md](Architecture.md) | текущая и целевая архитектура, стек, обоснование |
+| [Criteria.md](Criteria.md) | сценарии и технические критерии кейса, результаты проверок и сравнение моделей |
+| [TestCases.md](TestCases.md) | прогоны вопросов из questions.txt: эталон, ответ системы, видео |
+
 ## Возможности
 
 **Диалог с данными**
@@ -40,7 +48,7 @@ React (Vite, ECharts)  →  FastAPI  →  LLM-агент  →  PostgreSQL (сх�
 
 Модель не считает цифры: она выбирает таблицу и пишет SQL по описанию колонок, код проверяет
 запрос, база выполняет его только на чтение, модель пересказывает готовый результат.
-Подробнее: [docs/architecture.md](docs/architecture.md), формат API — [docs/api-contract.md](docs/api-contract.md).
+Подробнее: [Architecture.md](Architecture.md), формат API — [docs/api-contract.md](docs/api-contract.md).
 
 | Слой | Технологии |
 |---|---|
