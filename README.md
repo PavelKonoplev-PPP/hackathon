@@ -13,7 +13,7 @@
 |---|---|
 | [Architecture.md](Architecture.md) | текущая и целевая архитектура, стек, обоснование |
 | [Criteria.md](Criteria.md) | сценарии и технические критерии кейса, результаты проверок и сравнение моделей |
-| [TestCases.md](TestCases.md) | прогоны вопросов из questions.txt: эталон, ответ системы, видео |
+| [TestCases.md](TestCases.md) | прогоны вопросов из questions.txt: эталон и ответ системы |
 
 ## Возможности
 
