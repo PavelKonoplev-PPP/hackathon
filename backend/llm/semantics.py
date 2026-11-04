@@ -462,7 +462,7 @@ def _check_named_value_subquery(sql: str, question: str,
                          + re.escape(literal))
             if any(re.search(condition, item, re.IGNORECASE) for item in nested):
                 return [f'Для условия «{value}» используй прямой WHERE "{column}" = \'{value}\' '
-                        "в основном запросе, без инвертирующего NOT IN."]
+                        "в основном запросе, без подзапроса, инвертирующего отбор через NOT IN."]
     return []
 
 
