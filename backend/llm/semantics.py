@@ -398,6 +398,32 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if re.search(r"\b100(\.0*)?\s*\*\s*avg\s*\(", low) and \
             not re.search(r"процент|%|доля|долю|доли", question, re.IGNORECASE):
         problems.append("Не умножай среднее на 100: проценты в вопросе не просили.")
+    # Средняя оценка — это AVG числового поля, не процент положительных
+    # ответов. Проверяем исходную метрику, а не её псевдоним в SELECT.
+    if (re.search(r"\bсредн\w*\b", question, re.IGNORECASE)
+            and re.search(r"\bоценк\w*\b", question, re.IGNORECASE)
+            and not re.search(r"процент|дол[яиюей]|%|csat|nps", question, re.IGNORECASE)):
+        known_ratings = [
+            name for name in (numeric_columns or columns or [])
+            if re.search(r"оценк", name, re.IGNORECASE)
+        ]
+        if known_ratings:
+            has_rating_avg = any(
+                re.search(
+                    r'\bavg\s*\(\s*(?:distinct\s+)?(?:(?:t|"t")\s*\.\s*)?"'
+                    + re.escape(name) + r'"\s*\)',
+                    sql, re.IGNORECASE,
+                )
+                for name in known_ratings
+            )
+            if not has_rating_avg:
+                suggested = " или ".join(f'AVG("{name}")' for name in known_ratings)
+                problems.append(
+                    "Запрошена средняя числовая оценка клиента: используй "
+                    + suggested
+                    + ", а не долю положительных оценок в процентах "
+                    "(100 * COUNT(...) FILTER (...) / COUNT(...))."
+                )
     if intent.wants_distinct and "distinct" not in low:
         problems.append("В вопросе «разных/уникальных»: считай COUNT(DISTINCT \"колонка\").")
     if intent.time_grain and not re.search(r"date_trunc|extract|date_part", low):
