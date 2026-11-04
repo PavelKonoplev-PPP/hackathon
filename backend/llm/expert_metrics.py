@@ -105,6 +105,8 @@ def expert_sql_hint(question: str, columns: list[str]) -> str:
                 "EXTRACT(EPOCH FROM (\"Закрыто (МСК)\" - \"Создано (МСК)\"))/3600, "
                 "затем группируй по \"Группа поддержки\" и рассчитывай "
                 f"PERCENTILE_CONT({cutoff:g}) WITHIN GROUP (ORDER BY часы_решения). "
+                "Выведи в итоговом SELECT и COUNT(*) AS cases (количество закрытий), "
+                "и PERCENTILE_CONT(0.9) с округлением до двух знаков. "
                 "Если требуется минимум 100 закрытий, поставь HAVING COUNT(*) >= 100. "
                 "Используй CTE WITH s AS (SELECT ... FROM t); никаких AVG/MAX вместо перцентиля.\n"
             )
@@ -120,7 +122,9 @@ def expert_sql_hint(question: str, columns: list[str]) -> str:
                 "EXTRACT(EPOCH FROM (\"Доставлено (МСК)\" - \"Обещанный срок (МСК)\"))/3600). "
                 "Группируй по \"Перевозчик\"; используй "
                 f"PERCENTILE_CONT({cutoff:g}) WITHIN GROUP (ORDER BY задержка_часы). "
-                "Доставку вовремя учитывай как ноль. Можно использовать CTE из t.\n"
+                "Доставку вовремя учитывай как ноль. Выведи в итоговом SELECT "
+                "COUNT(*) AS deliveries и перцентиль с округлением до двух знаков. "
+                "Можно использовать CTE из t.\n"
             )
     if _is_asof_purchase(q, columns):
         exclusive_end = _end_of_day(q)
@@ -199,6 +203,27 @@ def check_expert_sql(sql: str, question: str, columns: list[str]) -> list[str]:
             r"\bgreatest\s*\(\s*0(?:\.0+)?\s*,", sql, re.IGNORECASE
         ):
             problems.append("Доставку вовремя считай нулевой задержкой: GREATEST(0, ...).")
+        # The reference acceptance includes the number of observations in
+        # addition to P90/P95; COUNT in HAVING is not an output column.
+        selects = list(re.finditer(r"\bselect\b", sql, re.IGNORECASE))
+        if selects:
+            final_select = sql[selects[-1].end():]
+            final_select = re.split(r"\bfrom\b", final_select, maxsplit=1,
+                                    flags=re.IGNORECASE)[0]
+            if not re.search(r"\bcount\s*\(\s*\*\s*\)", final_select, re.IGNORECASE):
+                problems.append(
+                    "Выведи COUNT(*) в итоговом SELECT рядом с перцентилем: "
+                    "для проверки нужен размер выборки по каждой группе."
+                )
+        if percentile == 90 and "времен" in q and re.search(r"менее\s+чем\s+100", q):
+            if not re.search(
+                r"\bhaving\s+count\s*\(\s*\*\s*\)\s*>=\s*100\b", sql,
+                re.IGNORECASE,
+            ):
+                problems.append("Исключи группы с менее чем 100: HAVING COUNT(*) >= 100.")
+        if "задерж" in q and _has(columns, "Статус"):
+            if not re.search(r'"Статус"\s*=\s*\'Доставлено\'', sql, re.IGNORECASE):
+                problems.append("Учитывай только доставленные: WHERE \"Статус\" = 'Доставлено'.")
     if _is_asof_purchase(q, columns):
         if re.search(r'"Статус"\s*=\s*\'Оплачена\'', sql, re.IGNORECASE):
             problems.append("Не отбирай статус «Оплачена», если требуются неоплаченные на дату.")
@@ -217,6 +242,28 @@ def check_expert_sql(sql: str, question: str, columns: list[str]) -> list[str]:
                 )
         if not re.search(r'"Согласована \(МСК\)"\s*(?:<|<=)\s*', sql, re.IGNORECASE):
             problems.append("Для состояния на дату отфильтруй время согласования до конца дня.")
+        exclusive_end = _end_of_day(q)
+        if exclusive_end:
+            # A well-shaped WHERE can still use midnight at the START of
+            # 31 March instead of midnight on 1 April. This silently loses
+            # an entire day, so validate the date for every event filter.
+            for name, operator in (
+                ("Согласована (МСК)", "<"),
+                ("Оплачена (МСК)", ">="),
+                ("Отменена (МСК)", ">="),
+                ("Отклонена (МСК)", ">="),
+            ):
+                pattern = (
+                    re.escape(f'"{name}"') + r"\s*" + re.escape(operator) +
+                    r"\s*(?:TIMESTAMP\s+|DATE\s+)?'([^']+)'"
+                )
+                dates = re.findall(pattern, sql, re.IGNORECASE)
+                if exclusive_end not in dates:
+                    problems.append(
+                        f'Исторический срез на конец дня: для "{name}" '
+                        f"используй границу {exclusive_end}, "
+                        "а не начало последнего дня."
+                    )
     if _is_retry_chain(q, columns):
         if not re.search(
             r"\bgroup\s+by\b[^;]*\"Код цепочки запусков\"", sql,
