@@ -1,7 +1,8 @@
 """Тесты разбора вопроса и смысловой проверки SQL (без модели и БД)."""
 import unittest
 
-from backend.llm.semantics import Intent, adjust_sql, check_sql, counted_noun, mentions
+from backend.llm.semantics import (Intent, adjust_sql, check_sql, counted_noun, mentions,
+                                   normalize_category_values, same_word)
 
 VALUES = {"Канал продажи": ["Интернет-магазин", "Мобильное приложение", "Розничный магазин"],
           "Статус": ["Ошибка", "Отменено", "Успешно"]}
@@ -37,6 +38,10 @@ class IntentTests(unittest.TestCase):
         self.assertTrue(mentions("продажи через мобильное приложение", "Мобильное приложение"))
         self.assertFalse(mentions("Выручка по каналам", "Интернет-магазин"))
 
+    def test_numeric_tokens_are_not_stemmed(self):
+        self.assertFalse(same_word("2025", "2026"))
+        self.assertTrue(same_word("2025", "2025"))
+
 
 class ViewTests(unittest.TestCase):
     def test_views(self):
@@ -51,6 +56,12 @@ class ViewTests(unittest.TestCase):
 
 
 class AdjustTests(unittest.TestCase):
+    def test_category_value_case_ending_is_normalized_when_unambiguous(self):
+        sql = ('SELECT COUNT(*) FILTER (WHERE "Канал обращения" = \'Чат в приложение\') '
+               'FROM t')
+        values = {"Канал обращения": ["Телефон", "Чат в приложении"]}
+        self.assertIn("'Чат в приложении'", normalize_category_values(sql, values))
+
     def test_adjust_sql_strips_rub_from_rating_and_count_aliases_defect_4(self):
         intent = Intent.parse("какая средняя оценка")
         sql = 'SELECT AVG("Оценка") AS "Средняя оценка, руб." FROM t'
@@ -112,6 +123,84 @@ class CheckTests(unittest.TestCase):
                              columns=list(values))
         self.assertIn("'Без карты лояльности'", problems[0])
         self.assertNotIn("Банковская", problems[0])
+
+    def test_average_requires_named_numeric_column(self):
+        q = "Какая средняя оценка клиента по каналам обращения?"
+        bad = check_sql(
+            'SELECT "Канал обращения", 100.0 * COUNT(*) / COUNT(*) FROM t GROUP BY 1',
+            q, Intent.parse(q), {}, numeric_columns=["Оценка клиента"],
+            columns=["Канал обращения", "Оценка клиента"])
+        self.assertTrue(any('AVG("Оценка клиента")' in p for p in bad))
+        good = check_sql(
+            'SELECT "Канал обращения", AVG("Оценка клиента") FROM t GROUP BY 1',
+            q, Intent.parse(q), {}, numeric_columns=["Оценка клиента"],
+            columns=["Канал обращения", "Оценка клиента"])
+        self.assertFalse(good)
+
+    def test_unmentioned_null_filter_is_rejected(self):
+        q = "Сколько строк продаж без карты?"
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        sql = ('SELECT COUNT(*) FROM t WHERE "Код покупателя" IS NULL AND '
+               '"Уровень программы лояльности" = \'Без карты лояльности\'')
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код покупателя", "Уровень программы лояльности"])
+        self.assertTrue(any('Код покупателя' in p and 'пустому' in p for p in problems))
+
+    def test_named_category_subquery_is_rejected(self):
+        q = "Сколько уникальных заказов без карты?"
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        sql = ('SELECT COUNT(DISTINCT "Код заказа") FROM t WHERE "Код покупателя" NOT IN '
+               '(SELECT "Код покупателя" FROM t WHERE '
+               '"Уровень программы лояльности" = \'Без карты лояльности\')')
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код заказа", "Код покупателя",
+                                      "Уровень программы лояльности"])
+        self.assertTrue(any('без подзапроса' in p for p in problems))
+
+    def test_average_guard_does_not_ban_other_aggregate_ratios(self):
+        q = "Какое среднее количество заказов на покупателя?"
+        sql = 'SELECT COUNT(*)::numeric / NULLIF(COUNT(DISTINCT "Код покупателя"), 0) FROM t'
+        problems = check_sql(sql, q, Intent.parse(q), {}, numeric_columns=["Количество заказов"],
+                             columns=["Количество заказов", "Код покупателя"])
+        self.assertFalse(any("среднюю числовую оценку" in p for p in problems))
+
+    def test_is_not_null_is_allowed_for_valid_metric(self):
+        q = "Сколько закрытых обращений через чат?"
+        sql = ('SELECT COUNT(*) FROM t WHERE "Канал обращения" = \'Чат в приложении\' '
+               'AND "Дата закрытия" IS NOT NULL')
+        values = {"Канал обращения": ["Чат в приложении"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Канал обращения", "Дата закрытия"])
+        self.assertFalse(any('пустому' in p for p in problems))
+
+    def test_is_null_without_named_category_is_not_blocked(self):
+        q = "Сколько обращений с пустой датой закрытия?"
+        sql = 'SELECT COUNT(*) FROM t WHERE "Дата закрытия" IS NULL'
+        problems = check_sql(sql, q, Intent.parse(q), {},
+                             columns=["Дата закрытия"])
+        self.assertFalse(any('пустому' in p for p in problems))
+
+    def test_valid_subquery_is_not_rejected_as_inverted_category(self):
+        q = "Сколько уникальных заказов без карты?"
+        sql = ('SELECT COUNT(DISTINCT "Код заказа") FROM t '
+               'WHERE "Уровень программы лояльности" = \'Без карты лояльности\' '
+               'AND "Код заказа" IN (SELECT "Код заказа" FROM t)')
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код заказа", "Уровень программы лояльности"])
+        self.assertFalse(any('без подзапроса' in p for p in problems))
+
+    def test_unrelated_not_in_is_not_rejected_as_category_filter(self):
+        q = "Сколько уникальных заказов без карты?"
+        sql = ('SELECT COUNT(DISTINCT "Код заказа") FROM t '
+               'WHERE "Уровень программы лояльности" = \'Без карты лояльности\' '
+               'AND "Код покупателя" NOT IN '
+               '(SELECT "Код покупателя" FROM t WHERE "Код покупателя" IS NULL)')
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код заказа", "Код покупателя",
+                                      "Уровень программы лояльности"])
+        self.assertFalse(any('без подзапроса' in p for p in problems))
 
     def test_must_read_t(self):
         self.assertTrue(self.check("SELECT 'нет данных'", "Какая погода?"))

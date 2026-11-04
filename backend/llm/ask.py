@@ -39,7 +39,7 @@ from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, In
                         adjust_sql, check_destructive_mutation, check_money, check_sql,
                         counted_noun, detect_ambiguous_query, detect_out_of_scope,
                         is_pure_view_request, mentions, money_formula, overlap, requested_view,
-                        SHARE,
+                        normalize_category_values, SHARE,
                         same_word, strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
@@ -1003,6 +1003,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                                                        extra_hint))
         try:
             sql = adjust_sql(validate_sql(extract_sql(reply), column_names), intent)
+            sql = normalize_category_values(sql, values)
             sql, removed = strip_unmentioned_filters(sql, full_question, values, table_words)
             if removed:
                 say(f"Убраны лишние фильтры: {'; '.join(removed)}")

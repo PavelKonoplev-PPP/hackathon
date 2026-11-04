@@ -37,6 +37,8 @@ def words(text: str) -> set[str]:
 
 def same_word(a: str, b: str) -> bool:
     """«теме» ~ «тема», «каналам» ~ «канал», «розницу» ~ «розничный»: общее начало слова."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -47,6 +49,8 @@ def same_word(a: str, b: str) -> bool:
 
 def strong_word(a: str, b: str) -> bool:
     """Почти та же словоформа: «операций» ~ «операции», но не «оператора»."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -248,6 +252,41 @@ def strip_unmentioned_filters(sql: str, question: str, values: dict[str, list[st
     return (sql[:start].rstrip() + where + sql[end:].lstrip()).strip(), removed
 
 
+def _value_tokens_match(left: str, right: str) -> bool:
+    """Падежные варианты значения категории: «в приложение» ~ «в приложении»."""
+    a = re.findall(r"[а-яёa-z0-9]+", left.lower().replace("ё", "е"))
+    b = re.findall(r"[а-яёa-z0-9]+", right.lower().replace("ё", "е"))
+    if len(a) != len(b):
+        return False
+    return all(x == y if min(len(x), len(y)) < 4 else same_word(x, y)
+               for x, y in zip(a, b))
+
+
+def normalize_category_values(sql: str, values: dict[str, list[str]]) -> str:
+    """Исправляет однозначный падежный вариант на точное значение из данных.
+
+    Ничего не меняет, если совпадений нет или их несколько: в таком случае обычная
+    смысловая проверка вернёт модели список допустимых значений.
+    """
+    def replace_filter(match: re.Match) -> str:
+        column, op, raw = match.groups()
+        known = values.get(column)
+        if not known or "like" in op.lower():
+            return match.group(0)
+        fixed = raw
+        for literal in _literals(raw):
+            if literal.lower() in {v.lower() for v in known}:
+                continue
+            candidates = [v for v in known if _value_tokens_match(literal, v)]
+            if len(candidates) == 1:
+                old = "'" + literal.replace("'", "''") + "'"
+                new = "'" + candidates[0].replace("'", "''") + "'"
+                fixed = fixed.replace(old, new)
+        return f'"{column}" {op} {fixed}'
+
+    return _FILTER.sub(replace_filter, sql)
+
+
 def _asked_words(question: str, ignore: set[str] | None) -> set[str]:
     asked = words(question)
     if ignore:
@@ -363,6 +402,70 @@ def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list
     return problems
 
 
+def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
+                   aliases: dict[str, list[str]] | None) -> list[str]:
+    """«Средняя оценка» должна усреднять числовую колонку рейтинга, не COUNT-долю."""
+    if (not numeric_columns
+            or not re.search(r"\bсредн\w*", question, re.IGNORECASE)
+            or not re.search(r"\bоценк\w*", question, re.IGNORECASE)):
+        return []
+    asked = words(question)
+    matching = [c for c in numeric_columns
+                if re.search(r"оценк", c, re.IGNORECASE)
+                and overlap(asked, words(c) | _alias_words(c, aliases))]
+    if not matching:
+        return []
+    if any(re.search(r'\bavg\s*\(\s*(?:t\.)?"' + re.escape(c) + r'"\s*\)', sql,
+                     re.IGNORECASE) for c in matching):
+        return []
+    options = " или ".join(f'AVG("{c}")' for c in matching)
+    return [f"Вопрос просит среднюю числовую оценку: используй {options}."]
+
+
+def _check_unmentioned_nulls(sql: str, question: str,
+                             values: dict[str, list[str]],
+                             ignore: set[str] | None,
+                             aliases: dict[str, list[str]] | None) -> list[str]:
+    """Отклоняем лишний IS NULL только при уже заданной именованной категории.
+
+    IS NOT NULL часто нужен для нормальных метрик, его не запрещаем.
+    """
+    if re.search(r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
+                 question, re.IGNORECASE):
+        return []
+    named = [(c, v) for c, known in values.items() for v in known
+             if mentions(question, v, ignore)]
+    if not any(re.search(r'"' + re.escape(c) + r'"\s*=\s*' +
+                         re.escape("'" + v.replace("'", "''") + "'"), sql, re.IGNORECASE)
+               for c, v in named):
+        return []
+    asked = words(question)
+    for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
+        if not overlap(asked, words(column) | _alias_words(column, aliases)):
+            return [f'Фильтр по пустому значению "{column}" не упоминается в вопросе — убери его.']
+    return []
+
+
+def _check_named_value_subquery(sql: str, question: str,
+                                values: dict[str, list[str]],
+                                ignore: set[str] | None) -> list[str]:
+    """Отклоняем инверсию именованной категории через NOT IN, не все подзапросы."""
+    nested = re.findall(r"\bnot\s+in\s*\(\s*select\b[^)]*\)", sql, re.IGNORECASE | re.DOTALL)
+    if not nested:
+        return []
+    for column, known in values.items():
+        for value in known:
+            if not mentions(question, value, ignore):
+                continue
+            literal = "'" + value.replace("'", "''") + "'"
+            condition = (r'"' + re.escape(column) + r'"\s*=\s*'
+                         + re.escape(literal))
+            if any(re.search(condition, item, re.IGNORECASE) for item in nested):
+                return [f'Для условия «{value}» используй прямой WHERE "{column}" = \'{value}\' '
+                        "в основном запросе, без подзапроса, инвертирующего отбор через NOT IN."]
+    return []
+
+
 def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
               strict: bool = True, ignore: set[str] | None = None,
               numeric_columns: list[str] | None = None,
@@ -378,6 +481,9 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     """
     problems = []
     low = sql.lower()
+    problems += _check_average(sql, question, numeric_columns, aliases)
+    problems += _check_unmentioned_nulls(sql, question, values, ignore, aliases)
+    problems += _check_named_value_subquery(sql, question, values, ignore)
     if intent.is_count and not _AGG.search(sql):
         problems.append("Вопрос «сколько»: нужен COUNT(...) или SUM(...), а не список строк.")
     noun = counted_noun(question)
