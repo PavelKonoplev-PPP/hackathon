@@ -28,6 +28,7 @@ from pathlib import Path
 from collections import OrderedDict
 
 from . import advanced_analytics as adv
+from . import expert_metrics as em
 from . import compare as cmp
 from . import glossary as gl
 from . import kpis as kp
@@ -989,6 +990,9 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     column_names = [c["name"] for c in table.get("columns") or []]
     numeric_columns = [c["name"] for c in table.get("columns") or []
                        if column_kind(c) in ("integer", "decimal")]
+    # Verified rules for expert metrics: only when the source has the
+    # requisite columns; no benchmark results are embedded in the prompt.
+    extra_hint += em.expert_sql_hint(full_question, column_names)
     table_words = words(display_table_name(table["name"]))
     history: list[dict] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -1006,6 +1010,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                                  strict=attempt < MAX_ATTEMPTS, ignore=table_words,
                                  numeric_columns=numeric_columns, columns=column_names,
                                  aliases=gl.aliases(table))
+            problems += em.check_expert_sql(sql, full_question, column_names)
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
             if kpi:  # утверждённая формула обязательна на всех попытках: лучше честная
