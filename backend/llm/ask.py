@@ -430,7 +430,7 @@ def answer_looks_good(answer: str, columns: list[str], rows: list[tuple]) -> boo
     return any(item and item in answer for item in shown)
 
 
-NON_ADDITIVE = re.compile(r"сред|доля|процент|%|медиан|рейтинг|оценк|минимал|максимал|ставк",
+NON_ADDITIVE = re.compile(r"сред|доля|процент|%|медиан|перцентил|квантил|p90|p95|рейтинг|оценк|минимал|максимал|ставк",
                           re.IGNORECASE)
 
 
