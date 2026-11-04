@@ -150,7 +150,7 @@ CASES = [
             ORDER BY amount DESC NULLS LAST, department LIMIT 1
         """,
         "columns": ["department", "requests", "amount"],
-        "expected": ["ИТ", 4158, "851088269.49"],
+        "expected": ["Информационные технологии", 4158, "851088269.49"],
     },
     {
         "id": "expert_06_retry_chains",
