@@ -1,6 +1,9 @@
 """Unit checks for expert PostgreSQL reference runner without a database."""
+import subprocess
+import sys
 import unittest
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import Mock
 
 from expert_regression import (
@@ -10,6 +13,22 @@ from expert_regression import (
 
 
 class ExpertRegressionTests(unittest.TestCase):
+    def test_direct_script_resolves_backend_in_isolated_python(self):
+        """Direct script execution must expose backend without PYTHONPATH."""
+        root = Path(__file__).resolve().parent.parent
+        script = root / "db" / "expert_regression.py"
+        probe = (
+            "import runpy; "
+            f"runpy.run_path({str(script)!r}); "
+            "from backend.llm.catalog_summary import display_table_name; "
+            "assert callable(display_table_name)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", probe],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_six_distinct_cases(self):
         self.assertEqual(len(CASES), 6)
         self.assertEqual(len({c["id"] for c in CASES}), 6)
