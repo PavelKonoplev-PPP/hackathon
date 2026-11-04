@@ -136,6 +136,25 @@ class ExpertApiRegressionTests(unittest.TestCase):
         }
         self.assertEqual(evaluate_api_response(got, case)["status"], "fail")
 
+    def test_api_no_sql_is_not_wrong_table(self):
+        case = CASES[0]
+        report = evaluate_api_response({
+            "table": None, "sql": None, "rows": None,
+            "answer": "Не получилось надёжно посчитать",
+        }, case)
+        self.assertEqual(report["diagnosis"], "no_sql")
+        self.assertEqual(report["expected"], case["expected"])
+
+    def test_api_empty_result_is_not_wrong_table(self):
+        case = CASES[4]
+        report = evaluate_api_response({
+            "table": None,
+            "sql": 'SELECT "Подразделение", SUM("Согласованная сумма, руб.") FROM t GROUP BY 1',
+            "rows": None,
+        }, case)
+        self.assertEqual(report["diagnosis"], "empty_result")
+        self.assertEqual(report["expected"], case["expected"])
+
     def test_api_purchase_full_department(self):
         case = CASES[4]
         got = {
