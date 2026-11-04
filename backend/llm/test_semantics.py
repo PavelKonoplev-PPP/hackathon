@@ -188,7 +188,7 @@ class CheckTests(unittest.TestCase):
         values = {"Уровень программы лояльности": ["Без карты лояльности"]}
         problems = check_sql(sql, q, Intent.parse(q), values,
                              columns=["Код заказа", "Уровень программы лояльности"])
-        self.assertFalse(any('инвертирующего NOT IN' in p for p in problems))
+        self.assertFalse(any('без подзапроса' in p for p in problems))
 
     def test_unrelated_not_in_is_not_rejected_as_category_filter(self):
         q = "Сколько уникальных заказов без карты?"
@@ -200,7 +200,7 @@ class CheckTests(unittest.TestCase):
         problems = check_sql(sql, q, Intent.parse(q), values,
                              columns=["Код заказа", "Код покупателя",
                                       "Уровень программы лояльности"])
-        self.assertFalse(any('инвертирующего NOT IN' in p for p in problems))
+        self.assertFalse(any('без подзапроса' in p for p in problems))
 
     def test_must_read_t(self):
         self.assertTrue(self.check("SELECT 'нет данных'", "Какая погода?"))
