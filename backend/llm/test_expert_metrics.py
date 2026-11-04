@@ -245,5 +245,87 @@ SELECT "Перевозчик",
         self.assertEqual(check_expert_sql(other, Q_PURCHASE, SALES), [])
 
 
+class ExpertFallbackIntegrationTests(unittest.TestCase):
+    """A real answer_question invocation with a refusing fake LLM."""
+
+    def _run(self, fail_db=False):
+        from decimal import Decimal
+
+        from backend.llm.ask import answer_question
+        from backend.llm.sql_runner import QueryResult
+
+        class RepeatingBadClient:
+            def __init__(self):
+                self.calls = 0
+
+            def chat(self, messages, **kwargs):
+                self.calls += 1
+                return 'SELECT "Задание", AVG("Номер попытки") FROM t GROUP BY "Задание"'
+
+        class FakeReadOnlyRunner:
+            def __init__(self):
+                self.calls = []
+
+            def category_values(self, table):
+                return {}
+
+            def run(self, table, sql):
+                self.calls.append(sql)
+                if fail_db:
+                    raise RuntimeError("PostgreSQL query failed")
+                return QueryResult(
+                    columns=["job", "total_chains", "retry_success", "share_pct", "avg_attempts"],
+                    rows=[("Очистка временных файлов", 11083, 581,
+                           Decimal("5.24"), Decimal("2.32"))],
+                )
+
+        table = {
+            "name": "data_08_Фоновые_задания",
+            "columns": [
+                {"name": column, "inferred_type": "integer" if column == "Номер попытки"
+                 else "category"}
+                for column in JOBS
+            ],
+        }
+        runner = FakeReadOnlyRunner()
+        client = RepeatingBadClient()
+        trace = {}
+        response = answer_question(
+            Q_JOBS, {"schema": "raw", "tables": [table]}, runner,
+            client=client, trace=trace,
+            table_name="data_08_Фоновые_задания",
+        )
+        return response, runner, client, trace
+
+    def test_llm_exhausted_then_fallback_executes_safe_sql(self):
+        response, runner, client, trace = self._run()
+        self.assertTrue(trace["expert_fallback"])
+        self.assertEqual(len(trace["errors"]), 3)
+        self.assertEqual(len(runner.calls), 1)
+        self.assertIn("ARRAY_AGG", runner.calls[0])
+        self.assertIn("SELECT", response["sql"])
+        self.assertEqual(response["table_name"], "data_08_Фоновые_задания")
+        self.assertEqual(len(response["table"]["rows"]), 1)
+        self.assertGreaterEqual(client.calls, 3)
+
+    def test_fallback_error_never_returns_fabricated_numbers(self):
+        response, runner, client, trace = self._run(fail_db=True)
+        self.assertFalse(response.get("table"))
+        self.assertNotIn("11083", response["answer"])
+        self.assertTrue(any("Ошибка проверенной формулы" in error
+                            for error in trace["errors"]))
+
+    def test_percentiles_are_not_additive(self):
+        from backend.llm.ask import is_additive, template_answer
+        self.assertFalse(is_additive("P90"))
+        self.assertFalse(is_additive("95-й перцентиль задержки, часы"))
+        text = template_answer(
+            ["Перевозчик", "95-й перцентиль задержки, часы"],
+            [("Первый", 22.5), ("Второй", 20.1)],
+            False,
+        )
+        self.assertNotIn("Всего:", text)
+
+
 if __name__ == "__main__":
     unittest.main()
