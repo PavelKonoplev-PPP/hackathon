@@ -13,6 +13,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+# When run as "python db/expert_regression.py", sys.path starts in db/.
+# Include the repository root so the API mode can import backend modules.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import psycopg
 
 try:
