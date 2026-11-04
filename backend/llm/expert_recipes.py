@@ -32,8 +32,9 @@ def _comparison_months(question: str) -> tuple[dt.date, dt.date, dt.date] | None
     previous_end = current
     previous_last = current - dt.timedelta(days=1)
     previous_start = dt.date(previous_last.year, previous_last.month, 1)
-    pattern = r"\bк\s+" + _MONTH_STEMS[previous_start.month] + r"\w*(?:\s+\d{4})?\b"
-    if not re.search(pattern, question, re.IGNORECASE):
+    pattern = r"\bк\s+" + _MONTH_STEMS[previous_start.month] + r"\w*(?:\s+(\d{4}))?\b"
+    match = re.search(pattern, question, re.IGNORECASE)
+    if not match or (match.group(1) and int(match.group(1)) != previous_start.year):
         return None
     return previous_start, previous_end, current_end
 
@@ -64,8 +65,8 @@ WITH pharmacies AS (
     FROM t GROUP BY "ID_Лекарства"
 )
 SELECT monthly.drug AS drug,
-       ROUND(monthly.older / (pharmacies.n * {days_a}.0), 4) AS feb_daily,
-       ROUND(monthly.newer / (pharmacies.n * {days_b}.0), 4) AS mar_daily,
+       ROUND(monthly.older / (pharmacies.n * {days_a}.0), 4) AS previous_daily,
+       ROUND(monthly.newer / (pharmacies.n * {days_b}.0), 4) AS current_daily,
        ROUND(100 * (
            (monthly.newer / {days_b}.0) /
            NULLIF(monthly.older / {days_a}.0, 0) - 1
@@ -101,8 +102,8 @@ WITH monthly AS (
            ) AS newer
     FROM t GROUP BY "Город"
 )
-SELECT city, ROUND(older, 2) AS feb_revenue,
-       ROUND(newer, 2) AS mar_revenue,
+SELECT city, ROUND(older, 2) AS previous_revenue,
+       ROUND(newer, 2) AS current_revenue,
        ROUND(100 * (newer / NULLIF(older, 0) - 1), 2) AS growth_pct
 FROM monthly
 WHERE older IS NOT NULL AND newer IS NOT NULL
