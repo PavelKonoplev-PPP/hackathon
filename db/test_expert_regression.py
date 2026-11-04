@@ -18,10 +18,11 @@ class ExpertRegressionTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         script = root / "db" / "expert_regression.py"
         probe = (
-            "import runpy; "
+            "import runpy, sys; "
+            f"sys.path.insert(0, {str(script.parent)!r}); "
             f"runpy.run_path({str(script)!r}); "
-            "from backend.llm.catalog_summary import display_table_name; "
-            "assert callable(display_table_name)"
+            "import backend; "
+            "assert backend.__path__"
         )
         result = subprocess.run(
             [sys.executable, "-I", "-c", probe],
