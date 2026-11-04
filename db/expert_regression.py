@@ -246,27 +246,212 @@ def run_cases(conn, cases: list[dict]) -> dict:
     }
 
 
+
+# The exact expert questions in TestCases.md, not simplified prompts.
+EXPERT_API_CASES = {
+    "expert_01_drug_daily_growth": {
+        "table": "data_09_Лекарственные_препараты",
+        "question": (
+            "Лекарственные препараты: Какое лекарство сильнее всего выросло "
+            "в процентах по среднедневным продажам на аптеку в марте 2025 "
+            "к февралю, включая дни без продаж? Пришли расчёт."
+        ),
+    },
+    "expert_02_city_net_growth": {
+        "table": "data_01_Продажи",
+        "question": (
+            "Продажи: В каком городе сильнее всего выросла чистая выручка "
+            "в процентах в марте 2025 к февралю с учётом количества, скидок и возвратов?"
+        ),
+    },
+    "expert_03_support_p90": {
+        "table": "data_02_Техническая_поддержка",
+        "question": (
+            "Техподдержка: У какой группы максимальный 90-й перцентиль времени "
+            "решения среди обращений, закрытых в марте 2025? "
+            "Исключи группы с менее чем 100 закрытиями."
+        ),
+    },
+    "expert_04_delivery_p95": {
+        "table": "data_04_Доставка",
+        "question": (
+            "Доставка: У какого перевозчика максимальный 95-й перцентиль задержки "
+            "среди доставленных в марте 2025 отправлений? "
+            "Доставку вовремя считай нулевой задержкой."
+        ),
+    },
+    "expert_05_purchase_as_of": {
+        "table": "data_07_Заявки_на_закупку",
+        "question": (
+            "Заявки на закупку: Сколько было согласовано, но ещё не оплачено "
+            "на конец 31 марта 2025 по подразделениям, "
+            "исключая отменённые и отклонённые к этой дате заявки?"
+        ),
+    },
+    "expert_06_retry_chains": {
+        "table": "data_08_Фоновые_задания",
+        "question": (
+            "Фоновые задания: Для каждого задания рассчитай долю цепочек, "
+            "завершившихся успешно только после повторных попыток, "
+            "и среднее число попыток в таких цепочках."
+        ),
+    },
+}
+
+
+def _as_decimal(value: Any) -> Decimal | None:
+    """Read API numeric cells without losing precision to float formatting."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            number = Decimal(str(value))
+            return number if number.is_finite() else None
+        except ArithmeticError:
+            return None
+    if isinstance(value, str):
+        cleaned = (
+            value.strip().replace("\u00a0", "").replace("\u202f", "")
+            .replace(" ", "").replace(",", ".").removesuffix("%").removesuffix("₽")
+        )
+        try:
+            number = Decimal(cleaned)
+            return number if number.is_finite() else None
+        except ArithmeticError:
+            return None
+    return None
+
+
+def _expected_matches_cell(expected: Any, cell: Any) -> bool:
+    if isinstance(expected, str):
+        expected_numeric = _as_decimal(expected)
+        if expected_numeric is None:
+            return str(cell).strip().casefold() == expected.strip().casefold()
+    else:
+        expected_numeric = _as_decimal(expected)
+    got_numeric = _as_decimal(cell)
+    if got_numeric is None or expected_numeric is None:
+        return False
+    # Frontend can display decimal metrics rounded to two places.
+    tolerance = Decimal("0") if expected_numeric == expected_numeric.to_integral_value() else Decimal("0.0051")
+    return abs(got_numeric - expected_numeric) <= tolerance
+
+
+def evaluate_api_response(got: dict, case: dict) -> dict:
+    """Require the right source and all reference values in ONE table row.
+
+    This is a conservative numeric check; SQL semantics also need human review.
+    """
+    meta = EXPERT_API_CASES[case["id"]]
+    source = got.get("table")
+    from backend.llm.catalog_summary import display_table_name
+    expected_table = meta["table"]
+    if source not in (expected_table, display_table_name(expected_table)):
+        return {
+            "status": "fail", "reason": "Не совпадает таблица-источник",
+            "expected_table": expected_table, "actual_table": source,
+        }
+    if got.get("status") == "refused":
+        return {"status": "fail", "reason": "Агент отказался отвечать"}
+    rows = got.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return {"status": "fail", "reason": "Нет таблицы с числовыми результатами"}
+    expected = case["expected"]
+    for row in rows:
+        if all(any(_expected_matches_cell(value, cell) for cell in row)
+               for value in expected):
+            return {
+                "status": "pass",
+                "expected": expected,
+                "matched_row": [str(v) if v is not None else None for v in row],
+                "note": "Совпали значения в таблице; SQL и методику проверить отдельно.",
+            }
+    # Include a small safe preview, not all potentially sensitive source data.
+    return {
+        "status": "fail",
+        "reason": "Нет строки со всеми эталонными значениями",
+        "expected": expected,
+        "sample_rows": [
+            [str(v) if v is not None else None for v in row]
+            for row in rows[:3]
+        ],
+    }
+
+
+def run_api_cases(asker, cases: list[dict]) -> dict:
+    """Run unmodified expert prompts through the same async API as the UI."""
+    import time
+
+    results = []
+    for case in cases:
+        meta = EXPERT_API_CASES[case["id"]]
+        started = time.monotonic()
+        try:
+            got = asker([meta["question"]], "expert-" + case["id"])
+            check = evaluate_api_response(got, case)
+            results.append({
+                "id": case["id"], "description": case["description"],
+                "question": meta["question"],
+                "seconds": round(time.monotonic() - started, 1),
+                "actual_table": got.get("table"),
+                "sql": got.get("sql"),
+                "answer_excerpt": (got.get("answer") or "")[:600],
+                **check,
+            })
+        except (RuntimeError, ValueError, TimeoutError, OSError) as exc:
+            results.append({
+                "id": case["id"], "description": case["description"],
+                "question": meta["question"],
+                "seconds": round(time.monotonic() - started, 1),
+                "status": "error", "error": str(exc).splitlines()[0][:300],
+            })
+    return {
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "mode": "api",
+        "query_count": len(cases),
+        "passed": sum(r["status"] == "pass" for r in results),
+        "failed": sum(r["status"] == "fail" for r in results),
+        "errors": sum(r["status"] == "error" for r in results),
+        "results": results,
+    }
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify expert reference calculations on PostgreSQL")
     parser.add_argument("--case", choices=[c["id"] for c in CASES], action="append",
                         help="Run selected cases; defaults to all six")
     parser.add_argument("--report", type=Path,
                         help="Write a local JSON report (do not commit dataset outputs)")
+    parser.add_argument("--api", metavar="URL",
+                        help="Check the exact expert questions through FastAPI instead of SQL-only")
+    parser.add_argument("--api-sync", action="store_true",
+                        help="With --api: use synchronous /api/chat instead of /api/chat/jobs")
     args = parser.parse_args()
+    if args.api_sync and not args.api:
+        parser.error("--api-sync requires --api")
     chosen = [c for c in CASES if args.case is None or c["id"] in args.case]
     try:
-        with connect_readonly() as conn:
-            report = run_cases(conn, chosen)
+        if args.api:
+            from backend.llm.eval import ApiAsker
+            asker = ApiAsker(args.api, use_jobs=not args.api_sync)
+            asker.check()
+            report = run_api_cases(asker, chosen)
+        else:
+            with connect_readonly() as conn:
+                report = run_cases(conn, chosen)
         for result in report["results"]:
             print(f'{result["status"].upper():5} {result["id"]}')
             if result["status"] != "pass":
                 print(json.dumps(result, ensure_ascii=False, default=str, indent=2))
         print(f'Итого: {report["passed"]}/{report["query_count"]} OK; '
               f'{report["failed"]} расхождений; {report["errors"]} ошибок')
-        if args.report:
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
-                                   encoding="utf-8")
+        target = args.report or (
+            Path("data/expert-api-regression.json") if args.api else None
+        )
+        if target:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+                              encoding="utf-8")
+            print(f"Отчёт: {target}")
         return 0 if report["passed"] == report["query_count"] else 1
     except (OSError, ValueError, psycopg.Error) as exc:
         print(f"Ошибка проверки: {exc}", file=sys.stderr)
