@@ -404,26 +404,43 @@ def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list
 
 def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
                    aliases: dict[str, list[str]] | None) -> list[str]:
-    """«Средняя оценка» должна усреднять названную числовую колонку, не COUNT-долю."""
-    if not re.search(r"\bсредн", question, re.IGNORECASE) or not numeric_columns:
+    """«Средняя оценка» должна усреднять числовую колонку рейтинга, не COUNT-долю."""
+    if (not numeric_columns
+            or not re.search(r"\bсредн\w*", question, re.IGNORECASE)
+            or not re.search(r"\bоценк\w*", question, re.IGNORECASE)):
         return []
     asked = words(question)
     matching = [c for c in numeric_columns
-                if overlap(asked, words(c) | _alias_words(c, aliases))]
+                if re.search(r"оценк", c, re.IGNORECASE)
+                and overlap(asked, words(c) | _alias_words(c, aliases))]
     if not matching:
         return []
     if any(re.search(r'\bavg\s*\(\s*(?:t\.)?"' + re.escape(c) + r'"\s*\)', sql,
                      re.IGNORECASE) for c in matching):
         return []
     options = " или ".join(f'AVG("{c}")' for c in matching)
-    return [f"Вопрос просит среднее по названному числовому показателю: используй {options}."]
+    return [f"Вопрос просит среднюю числовую оценку: используй {options}."]
 
 
 def _check_unmentioned_nulls(sql: str, question: str,
+                             values: dict[str, list[str]],
+                             ignore: set[str] | None,
                              aliases: dict[str, list[str]] | None) -> list[str]:
-    """Не принимать выдуманный IS NULL по колонке, о которой пользователь не спрашивал."""
+    """Отклоняем лишний IS NULL только при уже заданной именованной категории.
+
+    IS NOT NULL часто нужен для нормальных метрик, его не запрещаем.
+    """
+    if re.search(r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
+                 question, re.IGNORECASE):
+        return []
+    named = [(c, v) for c, known in values.items() for v in known
+             if mentions(question, v, ignore)]
+    if not any(re.search(r'"' + re.escape(c) + r'"\s*=\s*' +
+                         re.escape("'" + v.replace("'", "''") + "'"), sql, re.IGNORECASE)
+               for c, v in named):
+        return []
     asked = words(question)
-    for column in re.findall(r'"([^"]+)"\s+is\s+(?:not\s+)?null', sql, re.IGNORECASE):
+    for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
         if not overlap(asked, words(column) | _alias_words(column, aliases)):
             return [f'Фильтр по пустому значению "{column}" не упоминается в вопросе — убери его.']
     return []
@@ -432,16 +449,21 @@ def _check_unmentioned_nulls(sql: str, question: str,
 def _check_named_value_subquery(sql: str, question: str,
                                 values: dict[str, list[str]],
                                 ignore: set[str] | None) -> list[str]:
-    """В одной таблице именованную категорию фильтруем прямо, без инвертирующего подзапроса."""
-    if not re.search(r"\(\s*select\b", sql, re.IGNORECASE):
+    """Отклоняем инверсию именованной категории через NOT IN, не все подзапросы."""
+    nested = re.findall(r"\bnot\s+in\s*\(\s*select\b[^)]*\)", sql, re.IGNORECASE | re.DOTALL)
+    if not nested:
         return []
-    named = [(column, value) for column, known in values.items() for value in known
-             if mentions(question, value, ignore)]
-    if not named:
-        return []
-    column, value = named[0]
-    return [f'Для условия «{value}» используй прямой WHERE "{column}" = \'{value}\' '
-            "в основном запросе, без подзапроса."]
+    for column, known in values.items():
+        for value in known:
+            if not mentions(question, value, ignore):
+                continue
+            literal = "'" + value.replace("'", "''") + "'"
+            condition = (r'"' + re.escape(column) + r'"\s*=\s*'
+                         + re.escape(literal))
+            if any(re.search(condition, item, re.IGNORECASE) for item in nested):
+                return [f'Для условия «{value}» используй прямой WHERE "{column}" = \'{value}\' '
+                        "в основном запросе, без инвертирующего NOT IN."]
+    return []
 
 
 def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
@@ -460,7 +482,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     problems = []
     low = sql.lower()
     problems += _check_average(sql, question, numeric_columns, aliases)
-    problems += _check_unmentioned_nulls(sql, question, aliases)
+    problems += _check_unmentioned_nulls(sql, question, values, ignore, aliases)
     problems += _check_named_value_subquery(sql, question, values, ignore)
     if intent.is_count and not _AGG.search(sql):
         problems.append("Вопрос «сколько»: нужен COUNT(...) или SUM(...), а не список строк.")
