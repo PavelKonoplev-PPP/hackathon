@@ -157,6 +157,51 @@ class CheckTests(unittest.TestCase):
                                       "Уровень программы лояльности"])
         self.assertTrue(any('без подзапроса' in p for p in problems))
 
+    def test_average_guard_does_not_ban_other_aggregate_ratios(self):
+        q = "Какое среднее количество заказов на покупателя?"
+        sql = 'SELECT COUNT(*)::numeric / NULLIF(COUNT(DISTINCT "Код покупателя"), 0) FROM t'
+        problems = check_sql(sql, q, Intent.parse(q), {}, numeric_columns=["Количество заказов"],
+                             columns=["Количество заказов", "Код покупателя"])
+        self.assertFalse(any("среднюю числовую оценку" in p for p in problems))
+
+    def test_is_not_null_is_allowed_for_valid_metric(self):
+        q = "Сколько закрытых обращений через чат?"
+        sql = ('SELECT COUNT(*) FROM t WHERE "Канал обращения" = \'Чат в приложении\' '
+               'AND "Дата закрытия" IS NOT NULL')
+        values = {"Канал обращения": ["Чат в приложении"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Канал обращения", "Дата закрытия"])
+        self.assertFalse(any('пустому' in p for p in problems))
+
+    def test_is_null_without_named_category_is_not_blocked(self):
+        q = "Сколько обращений с пустой датой закрытия?"
+        sql = 'SELECT COUNT(*) FROM t WHERE "Дата закрытия" IS NULL'
+        problems = check_sql(sql, q, Intent.parse(q), {},
+                             columns=["Дата закрытия"])
+        self.assertFalse(any('пустому' in p for p in problems))
+
+    def test_valid_subquery_is_not_rejected_as_inverted_category(self):
+        q = "Сколько уникальных заказов без карты?"
+        sql = ('SELECT COUNT(DISTINCT "Код заказа") FROM t '
+               'WHERE "Уровень программы лояльности" = \'Без карты лояльности\' '
+               'AND "Код заказа" IN (SELECT "Код заказа" FROM t)')
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код заказа", "Уровень программы лояльности"])
+        self.assertFalse(any('инвертирующего NOT IN' in p for p in problems))
+
+    def test_unrelated_not_in_is_not_rejected_as_category_filter(self):
+        q = "Сколько уникальных заказов без карты?"
+        sql = ('SELECT COUNT(DISTINCT "Код заказа") FROM t '
+               'WHERE "Уровень программы лояльности" = \'Без карты лояльности\' '
+               'AND "Код покупателя" NOT IN '
+               '(SELECT "Код покупателя" FROM t WHERE "Код покупателя" IS NULL)')
+        values = {"Уровень программы лояльности": ["Без карты лояльности"]}
+        problems = check_sql(sql, q, Intent.parse(q), values,
+                             columns=["Код заказа", "Код покупателя",
+                                      "Уровень программы лояльности"])
+        self.assertFalse(any('инвертирующего NOT IN' in p for p in problems))
+
     def test_must_read_t(self):
         self.assertTrue(self.check("SELECT 'нет данных'", "Какая погода?"))
 
