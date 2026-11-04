@@ -344,19 +344,29 @@ def evaluate_api_response(got: dict, case: dict) -> dict:
     """
     meta = EXPERT_API_CASES[case["id"]]
     source = got.get("table")
-    from backend.llm.catalog_summary import display_table_name
     expected_table = meta["table"]
-    if source not in (expected_table, display_table_name(expected_table)):
-        return {
-            "status": "fail", "reason": "Не совпадает таблица-источник",
-            "expected_table": expected_table, "actual_table": source,
-        }
+    expected = case["expected"]
+    base = {"status": "fail", "expected": expected,
+            "expected_table": expected_table, "actual_table": source}
     if got.get("status") == "refused":
-        return {"status": "fail", "reason": "Агент отказался отвечать"}
+        return {**base, "reason": "Агент отказался отвечать",
+                "diagnosis": "refused"}
     rows = got.get("rows")
     if not isinstance(rows, list) or not rows:
-        return {"status": "fail", "reason": "Нет таблицы с числовыми результатами"}
-    expected = case["expected"]
+        # table_name is intentionally unset when the agent has no result, so
+        # do not misdiagnose an empty result as choosing the wrong source.
+        return {
+            **base,
+            "reason": ("Агент не сформировал SQL и не вернул таблицу"
+                       if not got.get("sql") else
+                       "SQL выполнен, но не вернул строк результата"),
+            "diagnosis": ("no_sql" if not got.get("sql") else "empty_result"),
+        }
+    from backend.llm.catalog_summary import display_table_name
+    if source not in (expected_table, display_table_name(expected_table)):
+        return {**base, "reason": "Не совпадает таблица-источник",
+                "diagnosis": "wrong_source"}
+    
     for row in rows:
         if all(any(_expected_matches_cell(value, cell) for cell in row)
                for value in expected):
