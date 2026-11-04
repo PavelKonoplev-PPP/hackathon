@@ -4,6 +4,8 @@ import unittest
 from backend.llm.expert_metrics import (
     _end_of_day, _month_window, _percentile, check_expert_sql, expert_sql_hint,
 )
+from backend.llm.expert_recipes import expert_sql_recipe
+from backend.llm.sql_guard import validate_sql
 
 DRUG = ["ID_Аптеки", "ID_Лекарства", "Сколько_Купили", "Дата"]
 SALES = ["Город", "Количество, шт.", "Цена до скидки за единицу, руб.",
@@ -126,9 +128,10 @@ class ExpertSqlValidationTests(unittest.TestCase):
         self.assertIn("PERCENTILE_CONT(0.9)", " ".join(
             check_expert_sql(bad, Q_SUPPORT, SUPPORT)
         ))
-        good = ('SELECT "Группа поддержки", PERCENTILE_CONT(0.9) WITHIN GROUP '
+        good = ('SELECT "Группа поддержки", COUNT(*) AS cases, '
+                'PERCENTILE_CONT(0.9) WITHIN GROUP '
                 '(ORDER BY EXTRACT(EPOCH FROM ("Закрыто (МСК)" - "Создано (МСК)")) / 3600) '
-                'FROM t GROUP BY "Группа поддержки"')
+                'FROM t GROUP BY "Группа поддержки" HAVING COUNT(*) >= 100')
         self.assertEqual(check_expert_sql(good, Q_SUPPORT, SUPPORT), [])
 
     def test_bad_delivery_percentile_and_negative_delay_rejected(self):
@@ -138,10 +141,12 @@ class ExpertSqlValidationTests(unittest.TestCase):
         errors = " ".join(check_expert_sql(sql, Q_DELIVERY, DELIVERY))
         self.assertIn("PERCENTILE_CONT(0.95)", errors)
         self.assertIn("GREATEST(0", errors)
-        good = ('SELECT "Перевозчик", PERCENTILE_CONT(0.95) WITHIN GROUP '
+        good = ('SELECT "Перевозчик", COUNT(*) AS deliveries, '
+                'PERCENTILE_CONT(0.95) WITHIN GROUP '
                 '(ORDER BY GREATEST(0, EXTRACT(EPOCH FROM '
                 '("Доставлено (МСК)" - "Обещанный срок (МСК)")) / 3600)) '
-                'FROM t GROUP BY "Перевозчик"')
+                "FROM t WHERE \"Статус\" = 'Доставлено' "
+                'GROUP BY "Перевозчик"')
         self.assertEqual(check_expert_sql(good, Q_DELIVERY, DELIVERY), [])
 
     def test_bad_purchase_rejected_even_when_valid_sql(self):
@@ -157,6 +162,82 @@ class ExpertSqlValidationTests(unittest.TestCase):
         self.assertIn("AVG", errors)
         self.assertIn("Описание ошибки", errors)
         self.assertEqual(check_expert_sql(GOOD_JOBS, Q_JOBS, JOBS), [])
+
+    def test_actual_purchase_sql_wrong_midnight_is_rejected(self):
+        reported = """
+SELECT "Подразделение", COUNT(*), SUM("Согласованная сумма, руб.")
+FROM t
+WHERE "Согласована (МСК)" < TIMESTAMP '2025-03-31'
+AND ("Оплачена (МСК)" IS NULL OR "Оплачена (МСК)" >= TIMESTAMP '2025-03-31')
+AND ("Отменена (МСК)" IS NULL OR "Отменена (МСК)" >= TIMESTAMP '2025-03-31')
+AND ("Отклонена (МСК)" IS NULL OR "Отклонена (МСК)" >= TIMESTAMP '2025-03-31')
+GROUP BY "Подразделение"
+"""
+        problems = " ".join(check_expert_sql(reported, Q_PURCHASE, PURCHASE))
+        self.assertIn("2025-04-01", problems)
+        self.assertIn("начало последнего дня", problems)
+
+    def test_actual_support_sql_missing_sample_size_is_rejected(self):
+        reported = """
+WITH s AS (
+ SELECT "Группа поддержки",
+ EXTRACT(EPOCH FROM ("Закрыто (МСК)" - "Создано (МСК)")) / 3600 AS "Часы_решения"
+ FROM t WHERE "Закрыто (МСК)" >= '2025-03-01'
+ AND "Закрыто (МСК)" < '2025-04-01'
+)
+SELECT "Группа поддержки",
+ PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY "Часы_решения")
+ FROM s GROUP BY "Группа поддержки" HAVING COUNT(*) >= 100
+"""
+        errors = " ".join(check_expert_sql(reported, Q_SUPPORT, SUPPORT))
+        self.assertIn("размер выборки", errors)
+
+    def test_actual_delivery_sql_missing_count_and_status_is_rejected(self):
+        reported = """
+WITH delivery_delay AS (
+ SELECT "Перевозчик",
+ GREATEST(0, EXTRACT(EPOCH FROM (
+ "Доставлено (МСК)" - "Обещанный срок (МСК)")) / 3600) AS "Задержка, часы"
+ FROM t WHERE "Доставлено (МСК)" >= '2025-03-01'
+ AND "Доставлено (МСК)" < '2025-04-01'
+)
+SELECT "Перевозчик",
+ PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY "Задержка, часы")
+ FROM delivery_delay GROUP BY "Перевозчик"
+"""
+        errors = " ".join(check_expert_sql(reported, Q_DELIVERY, DELIVERY))
+        self.assertIn("размер выборки", errors)
+        self.assertIn('Статус', errors)
+
+    def test_deterministic_readonly_fallbacks(self):
+        scenarios = [
+            (Q_DRUG, DRUG, "COUNT(DISTINCT"),
+            (Q_SALES, SALES, "growth_pct"),
+            (Q_SUPPORT, SUPPORT, "HAVING COUNT(*) >= 100"),
+            (Q_DELIVERY, DELIVERY, '"Статус" = \'Доставлено\''),
+            (Q_PURCHASE, PURCHASE, "2025-04-01"),
+            (Q_JOBS, JOBS, "ARRAY_AGG"),
+        ]
+        for question, columns, token in scenarios:
+            with self.subTest(token=token):
+                recipe = expert_sql_recipe(question, columns)
+                self.assertIsNotNone(recipe)
+                self.assertIn(token, recipe)
+                self.assertEqual(validate_sql(recipe, columns), recipe)
+                self.assertEqual(check_expert_sql(recipe, question, columns), [])
+
+    def test_deterministic_fallback_requires_exact_domain_columns(self):
+        self.assertIsNone(expert_sql_recipe(Q_DRUG, ["ID_Аптеки"]))
+        self.assertIsNone(expert_sql_recipe(Q_SALES, ["Город"]))
+        self.assertIsNone(expert_sql_recipe(Q_PURCHASE, ["Статус"]))
+        self.assertIsNone(expert_sql_recipe("Сколько продаж?", SALES))
+
+    def test_fallback_uses_calendar_days_not_sales_days(self):
+        recipe = expert_sql_recipe(Q_DRUG, DRUG)
+        self.assertIn("28.0", recipe)
+        self.assertIn("31.0", recipe)
+        self.assertIn("2025-02-01", recipe)
+        self.assertIn("2025-04-01", recipe)
 
     def test_unrelated_queries_keep_existing_behaviour(self):
         other = 'SELECT "Подразделение", COUNT(*) FROM t GROUP BY "Подразделение"'
