@@ -46,7 +46,13 @@ class ExpertRegressionTests(unittest.TestCase):
 
     def test_runner_readonly_and_time_bounded(self):
         cursor = Mock()
-        cursor.fetchone.side_effect = [tuple(CASES[0]["expected"]), None]
+        cursor.fetchone.side_effect = [
+            tuple(
+                Decimal(v) if isinstance(v, str) and v[:1].isdigit() and "." in v else v
+                for v in CASES[0]["expected"]
+            ),
+            None,
+        ]
         conn = Mock()
         conn.transaction.return_value.__enter__ = Mock()
         conn.transaction.return_value.__exit__ = Mock(return_value=False)
