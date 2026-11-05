@@ -14,7 +14,7 @@ export default function ThemeSelect() {
         applyTheme(e.target.value)
       }}
     >
-      <option value="auto">Тема: как в системе</option>
+      <option value="auto">Как в системе</option>
       <option value="light">Светлая тема</option>
       <option value="dark">Тёмная тема</option>
     </select>

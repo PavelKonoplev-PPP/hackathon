@@ -128,8 +128,8 @@ main { flex: 1; min-width: 0; min-height: 0; display: flex; justify-content: cen
   border: none; background: none; color: var(--muted); cursor: pointer;
   font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: 4px;
 }
-.dialog .dialog-act { visibility: hidden; }
-.dialog:hover .dialog-act, .dialog:focus-within .dialog-act, .dialog-active .dialog-act { visibility: visible; }
+.dialog .dialog-act { opacity: 0; }
+.dialog:hover .dialog-act, .dialog:focus-within .dialog-act, .dialog-active .dialog-act { opacity: 1; }
 .dialog-act:hover { color: var(--text); background: var(--border); }
 .dialog-delete:hover { color: var(--error); }
 .inline-edit {
@@ -345,8 +345,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .widget-dragging { opacity: 0.4; }
 .widget-drop { outline: 2px dashed var(--accent); outline-offset: 2px; }
 .widget-head { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
-.widget-head .dialog-act { visibility: hidden; font-size: 14px; }
-.widget:hover .widget-head .dialog-act, .widget:focus-within .widget-head .dialog-act { visibility: visible; }
+.widget-head .dialog-act { opacity: 0; font-size: 14px; } /* opacity, а не visibility: кнопки доступны с клавиатуры */
+.widget:hover .widget-head .dialog-act, .widget:focus-within .widget-head .dialog-act { opacity: 1; }
 .widget-title {
   flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -388,6 +388,11 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .toast .dialog-act { color: var(--bg); }
 
 /* ---------- телефон ---------- */
+@media (pointer: coarse) {
+  .dialog .dialog-act { opacity: 1; }
+  .dialog-act { min-width: 32px; min-height: 32px; } /* пальцем в значок 20 × 20 не попасть */
+}
+
 @media (max-width: 700px) {
   .menu-btn { display: inline-block; }
   .nav, .badge { display: none; }
@@ -404,7 +409,7 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .widget { grid-column: auto; grid-row: auto; min-height: calc(var(--h) * 150px); }
   .widget .chart-fill { min-height: 240px; }
   .resize-handle, .drag-handle { display: none; }
-  .widget-head .dialog-act { visibility: visible; }
+  .widget-head .dialog-act { opacity: 1; }
   .inline-form input { min-width: 0; flex: 1; }
   .theme-select { max-width: 120px; }
 }
