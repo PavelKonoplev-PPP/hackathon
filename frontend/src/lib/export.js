@@ -7,7 +7,7 @@ const NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 const NS_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 const NS_PKG_REL = 'http://schemas.openxmlformats.org/package/2006/relationships'
 
-const STYLES = `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
+const STYLES = `${XML_HEAD}<styleSheet xmlns="${NS_MAIN}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="4" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="10" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`
 
 const esc = (s) =>
   String(s)
@@ -25,16 +25,38 @@ function colName(i) {
   return s
 }
 
-// Числа, которые бэкенд прислал строкой («1 150 771 281,54», «3.2845»), пишем числами — по ним можно
-// считать в Excel. Целые строки без разделителей (коды, «001») оставляем текстом.
-const NUMERIC_STR = /^-?\d{1,3}(?:[\s\u00a0]\d{3})+(?:[.,]\d+)?$|^-?\d+[.,]\d+$/
-const excelValue = (v) => (typeof v === 'string' && NUMERIC_STR.test(v.trim()) ? toNumber(v) : v)
+// Числа, которые бэкенд прислал строкой («1 150 771 281,54», «+11,7%», «87 822», «950»), пишем числами —
+// по ним можно считать в Excel. Коды остаются текстом: «001», длинные номера, колонки с кодами.
+const NUMERIC_STR = /^[+-]?\d{1,3}(?:[\s\u00a0]\d{3})+(?:[.,]\d+)?$|^[+-]?\d+[.,]\d+$/
+const INTEGER_STR = /^[+-]?\d+$/
+const PERCENT_STR = /^[+-]?\d[\d\s\u00a0]*(?:[.,]\d+)?\s?%$/
+const CODE_COLUMN = /(^|[\s_(«])(код|id|номер|артикул|инн|телефон|индекс)/i
+const LOOKS_LIKE_CODE = /^0\d|^\d{16,}$/
 
-// style: 1 — жирный заголовок, 2 — деньги «# ##0,00»
-function cellXml(raw, ref, style) {
-  const v = excelValue(raw)
+// Текстовая колонка: так названа, либо хотя бы одно значение похоже на код. Смотрим на всю колонку,
+// иначе в ней часть значений станет числами, а часть останется текстом.
+function isCodeColumn(name, rows, index) {
+  if (CODE_COLUMN.test(String(name))) return true
+  return rows.some((r) => typeof r[index] === 'string' && LOOKS_LIKE_CODE.test(r[index].trim()))
+}
+
+// { value, percent } для ячейки: число, если строка — это число.
+function excelValue(raw, codeColumn) {
+  if (typeof raw !== 'string' || codeColumn) return { value: raw }
+  const t = raw.trim()
+  if (PERCENT_STR.test(t)) return { value: +(toNumber(t.replace('%', '').replace(/^\+/, '')) / 100).toFixed(10), percent: true }
+  if (NUMERIC_STR.test(t) || INTEGER_STR.test(t)) return { value: toNumber(t.replace(/^\+/, '')) }
+  return { value: raw }
+}
+
+// style: 1 — жирный заголовок, 2 — деньги «# ##0,00», 3 — проценты
+function cellXml(raw, ref, style, codeColumn = false) {
+  const { value: v, percent } = excelValue(raw, codeColumn)
   if (v === null || v === undefined || v === '') return ''
-  if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"${style === 2 ? ' s="2"' : ''}><v>${v}</v></c>`
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const numStyle = percent ? ' s="3"' : style === 2 ? ' s="2"' : ''
+    return `<c r="${ref}"${numStyle}><v>${v}</v></c>`
+  }
   const s = style === 1 ? ' s="1"' : ''
   return `<c r="${ref}" t="inlineStr"${s}><is><t xml:space="preserve">${esc(v)}</t></is></c>`
 }
@@ -42,6 +64,7 @@ function cellXml(raw, ref, style) {
 function sheetXml(table) {
   const rows = [table.columns, ...table.rows]
   const moneyCols = table.columns.map((c) => unitOf(c) === '₽')
+  const codeCols = table.columns.map((c, i) => isCodeColumn(c, table.rows, i))
   const cols = table.columns
     .map((c, i) => {
       const longest = Math.max(String(c).length, ...table.rows.slice(0, 200).map((r) => String(r[i] ?? '').length))
@@ -49,7 +72,7 @@ function sheetXml(table) {
     })
     .join('')
   const body = rows
-    .map((row, r) => `<row r="${r + 1}">${row.map((v, c) => cellXml(v, colName(c) + (r + 1), r === 0 ? 1 : moneyCols[c] ? 2 : 0)).join('')}</row>`)
+    .map((row, r) => `<row r="${r + 1}">${row.map((v, c) => (r === 0 ? cellXml(String(v ?? ''), `${colName(c)}1`, 1, true) : cellXml(v, colName(c) + (r + 1), moneyCols[c] ? 2 : 0, codeCols[c]))).join('')}</row>`)
     .join('')
   return `${XML_HEAD}<worksheet xmlns="${NS_MAIN}"><cols>${cols}</cols><sheetData>${body}</sheetData></worksheet>`
 }

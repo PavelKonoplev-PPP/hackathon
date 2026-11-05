@@ -36,7 +36,7 @@ export default function DashboardPage({ id }) {
         setDash(d)
         setWidgets(d.widgets || [])
       })
-      .catch((e) => alive && setError(e.message))
+      .catch((e) => alive && setError(e.status === 404 ? 'его нет или он был удалён.' : e.message))
     return () => {
       alive = false
     }
