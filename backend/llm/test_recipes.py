@@ -115,6 +115,31 @@ class ChainsTests(unittest.TestCase):
                                    {"Status": ["failed", "cancelled"]}))
 
 
+class AnomalyTests(unittest.TestCase):
+    """#121: выбросы по Тьюки, с порогом, размером выборки и уровнем сущности."""
+    SALES = {"name": "orders", "columns": [
+        col("Номер чека", inferred="identifier"), col("Канал"), col("Количество, шт.", "integer"),
+        col("Цена за единицу, руб.", "decimal")]}
+
+    def test_entity_level_and_groups(self):
+        r = rc.build("Найди аномальные значения суммы чеков по каналам и поясни критерий", self.SALES)
+        self.assertEqual(r.kind, "anomaly")
+        self.assertIn('"Номер чека" AS e, SUM("Количество, шт." * "Цена за единицу, руб.") AS v', r.sql)
+        self.assertIn("percentile_cont(0.25)", r.sql)
+        self.assertIn("1.5 * (s.q3 - s.q1)", r.sql)
+        self.assertIn('d.g AS "Канал"', r.sql)
+        text = r.answer(["Канал", "Наблюдений", "Q1", "Q3", "Верхняя", "Выбросов", "Максимум"],
+                        [("Онлайн", 500, 10, 30, 60, 12, 900), ("Касса", 8, 5, 9, 15, 1, 40)])
+        self.assertIn("Выбросов всего 13 из 508", text)
+        self.assertIn("«Касса»", text)  # мало данных — вывод недостоверен
+        self.assertIn("Q1 − 1,5·IQR", text)
+
+    def test_numeric_column_without_groups(self):
+        r = rc.build("Есть ли выбросы в цене за единицу?", self.SALES)
+        self.assertIn('SELECT "Цена за единицу, руб." AS v FROM t WHERE', r.sql)
+        self.assertIn("CROSS JOIN s", r.sql)
+
+
 @unittest.skipUnless(CATALOG.is_file() and VALUES.is_file(), "нет каталога")
 class RealCatalogTests(unittest.TestCase):
     """Вопросы 3–6 TestCases.md строят тот же расчёт, что эталон, и не трогают обычные вопросы."""

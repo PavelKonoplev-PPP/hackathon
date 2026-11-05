@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from backend.llm.ask import _SESSIONS, two_segment_difference
 from backend.llm.ask import format_value
-from backend.llm.compare import (check_compare_sql, compare_summary, enrich_compare, is_compare,
+from backend.llm.compare import (check_compare_sql, compare_chart, compare_summary, enrich_compare, is_compare,
                                  parse_periods)
 from backend.llm.sql_runner import QueryResult
 from backend.llm.test_ask import FakeRunner, ask
@@ -120,6 +120,21 @@ class EnrichTests(unittest.TestCase):
         self.assertIn("в целом — рост: +35, +10,0%", text)
         self.assertIn("Сильнее всего выросло «Онлайн» (рост: +50, +50,0%)", text)
         self.assertIn("слабее всего — «Магазин» (снижение: -20, -10,0%)", text)
+
+    def test_two_attributes(self):
+        """#121: сегмент по двум признакам — имя из обоих, пустой период не участвует."""
+        periods = parse_periods("сравни август и сентябрь 2025")
+        cols, rows, pair = enrich_compare(
+            ["Способ доставки", "Перевозчик", "август 2025", "сентябрь 2025"],
+            [("Курьером", "Почта", 100, 150), ("Постамат", "Почта", 200, 180),
+             ("Курьером", "Сдэк", None, 90)], periods)
+        text = compare_summary(cols, rows, pair, format_value)
+        self.assertIn("«Курьером / Почта» (рост: +50, +50,0%)", text)
+        self.assertIn("«Постамат / Почта»", text)
+        self.assertIn("Для 1 сегм. нет данных", text)
+        chart = compare_chart(cols, rows, pair, format_value)
+        self.assertEqual(chart["categories"][0], "Курьером / Почта")
+        self.assertEqual(chart["x_label"], "Способ доставки / Перевозчик")
 
     def test_two_segments(self):
         self.assertEqual(two_segment_difference(["Город", "Выручка"], [("Казань", 80), ("Москва", 100)]),

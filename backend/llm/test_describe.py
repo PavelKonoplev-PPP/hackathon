@@ -153,5 +153,48 @@ class ShortenTests(unittest.TestCase):
                          "Хранит данные о продажах. Можно считать выручку.")
 
 
+class PeriodSectionTests(unittest.TestCase):
+    """#119: фактические даты по полям, без выдумок."""
+
+    def table(self, name, *cols):
+        return {"name": name, "columns": list(cols)}
+
+    def col(self, name, kind, policy="safe_complete", total=100, missing=0, invalid=0, inferred=None):
+        return {"name": name, "inferred_type": inferred or kind,
+                "conversion": {"target_type": kind, "policy": policy,
+                               "quality": {"total_rows": total, "missing_rows": missing,
+                                           "invalid_rows": invalid}}}
+
+    def test_ranges_nulls_and_tables_without_dates(self):
+        import datetime as dt
+        from backend.llm.describe import period_section
+
+        class R:
+            def date_range(self, table, column):
+                return {"Создано": (dt.datetime(2024, 10, 1, 8), dt.datetime(2026, 9, 30, 23)),
+                        "Закрыто": (dt.datetime(2024, 10, 2), dt.datetime(2026, 10, 1))}[column]
+
+        catalog = {"tables": [
+            self.table("data_02_Поддержка", self.col("Создано", "timestamp"),
+                       self.col("Закрыто", "timestamp", "safe_with_nulls", missing=15)),
+            self.table("data_10_Справочник", {"name": "Название", "inferred_type": "category"}),
+            self.table("data_11_Сырой", {"name": "Когда", "inferred_type": "timestamp",
+                                          "conversion": {"policy": "unsafe"}}),
+        ]}
+        text = period_section(catalog, R())
+        self.assertIn("«Поддержка»: «Создано» с 01.10.2024 по 30.09.2026", text)
+        self.assertIn("«Закрыто» с 02.10.2024 по 01.10.2026 (заполнено 85 из 100)", text)
+        self.assertIn("«Справочник»: нет поля даты — период определить нельзя", text)
+        self.assertIn("«Сырой»: поле даты неоднозначно", text)
+        self.assertIn("Общий интервал источника: с 01.10.2024 по 30.09.2026", text)
+
+    def test_without_runner_no_invented_dates(self):
+        from backend.llm.describe import period_section
+        catalog = {"tables": [self.table("data_01_Продажи", self.col("Дата", "date"))]}
+        text = period_section(catalog, None)
+        self.assertIn("статистика не рассчитана", text)
+        self.assertNotIn("Общий интервал", text)
+
+
 if __name__ == "__main__":
     unittest.main()

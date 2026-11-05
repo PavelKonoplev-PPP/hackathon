@@ -15,13 +15,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import re
 import sys
 from pathlib import Path
 
-from .catalog_summary import (display_table_name, match_table_name, overview_table, quality_section,
-                              relationships_section, summarize_catalog, table_block)
+from .catalog_summary import (display_table_name, format_int, match_table_name, overview_table,
+                              quality_section, relationships_section, summarize_catalog, table_block)
 
 RULES = """Правила:
 - Пиши по-русски, просто, для руководителя без технического опыта. Без SQL.
@@ -94,9 +95,89 @@ def describe_table(client, table: dict) -> str:
     return shorten(text, display_table_name(table["name"]))
 
 
+def _fmt_date(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, dt.datetime):
+        return value.strftime("%d.%m.%Y")
+    if isinstance(value, dt.date):
+        return value.strftime("%d.%m.%Y")
+    return str(value)[:10]
+
+
+def _as_date(value):
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def period_section(catalog: dict, runner=None) -> str:
+    """Фактический охват данных по датам (#119): MIN/MAX каждого поля даты — по корректным
+    значениям (тип в базе уже приведён), с числом пустых и некорректных значений из каталога.
+    Значения кэшируются по источнику (PostgresRunner.date_range), профиль на каждый вопрос
+    не пересчитывается. Ничего не выдумывается: нет поля даты или нет статистики — так и пишем."""
+    from .sql_runner import column_kind
+
+    lines, mins, maxs = [], [], []
+    for table in catalog.get("tables") or []:
+        name = display_table_name(table["name"])
+        columns = table.get("columns") or []
+        dates = [c for c in columns if column_kind(c) in ("date", "timestamp")]
+        unsure = [c["name"] for c in columns
+                  if c.get("inferred_type") in ("date", "timestamp") and column_kind(c) is None]
+        if not dates:
+            note = "нет поля даты — период определить нельзя"
+            if unsure:
+                note = ("поле даты неоднозначно (формат подтверждён не на всех строках): "
+                        + ", ".join(f"«{u}»" for u in unsure) + " — период не рассчитан")
+            lines.append(f"- «{name}»: {note}.")
+            continue
+        parts = []
+        for col in dates:
+            quality = (col.get("conversion") or {}).get("quality") or {}
+            total = quality.get("total_rows")
+            missing = quality.get("missing_rows") or 0
+            invalid = quality.get("invalid_rows") or 0
+            low = high = None
+            if runner is not None:
+                try:
+                    low, high = runner.date_range(table, col["name"])
+                except Exception:
+                    low = high = None
+            if low is None and high is None:
+                span = "статистика не рассчитана"
+            else:
+                span = f"с {_fmt_date(low)} по {_fmt_date(high)}"
+                if (col.get("conversion") or {}).get("policy") == "safe_complete":
+                    mins.append(_as_date(low))
+                    maxs.append(_as_date(high))
+            extra = []
+            if total and missing:
+                extra.append(f"заполнено {format_int(total - missing)} из {format_int(total)}")
+            if invalid:
+                extra.append(f"некорректных значений: {format_int(invalid)}")
+            parts.append(f"«{col['name']}» {span}" + (f" ({'; '.join(extra)})" if extra else ""))
+        lines.append(f"- «{name}»: " + "; ".join(parts) + ".")
+    mins = [m for m in mins if m]
+    maxs = [m for m in maxs if m]
+    header = ["Период данных (по полям дат, только корректные значения):"]
+    if len(catalog.get("tables") or []) > 1 and mins and maxs:
+        header.append(f"- Общий интервал источника: с {_fmt_date(min(mins))} по {_fmt_date(max(maxs))} "
+                      "(по основным датам таблиц; у отдельных таблиц он может быть уже).")
+    return "\n".join(header + lines)
+
+
 def describe_data(catalog: dict, relationships: dict | None = None,
-                  client=None, progress=None, table_name: str | None = None) -> dict:
-    """Возвращает ответ в формате docs/api-contract.md: answer + table."""
+                  client=None, progress=None, table_name: str | None = None,
+                  runner=None) -> dict:
+    """Возвращает ответ в формате docs/api-contract.md: answer + table.
+    runner — для фактических границ дат (#119); без него период честно помечается как
+    не рассчитанный."""
     if client is None:
         from .client import LLMClient
         client = LLMClient()
@@ -152,6 +233,7 @@ def describe_data(catalog: dict, relationships: dict | None = None,
         overview.split("Что можно спросить")[0].strip(),
         "Таблицы:\n" + "\n".join(f"{i}. «{name}» — {text}"
                                   for i, (name, text) in enumerate(parts, 1)),
+        period_section(catalog, runner),
         quality_section(catalog),
     ]
     if links:

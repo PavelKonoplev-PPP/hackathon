@@ -9,7 +9,8 @@
 - percentile — «90-й перцентиль времени решения по группам, закрытые в марте 2025,
   группы от 100 закрытий», «95-й перцентиль задержки», «медиана стоимости»;
 - as_of — «согласовано, но не оплачено на конец 31 марта 2025, исключая отменённые»;
-- chains — «доля цепочек, успешных только после повторных попыток, и среднее число попыток».
+- chains — «доля цепочек, успешных только после повторных попыток, и среднее число попыток»;
+- anomaly (#121) — «найди аномальные значения суммы заказов по каналам и поясни критерий».
 
 build() возвращает Recipe(sql, answer_fn, description) или None — тогда вопрос
 решает модель обычным путём. Если параметры определить нельзя, рецепт не строится:
@@ -383,13 +384,103 @@ def chains_recipe(question: str, table: dict, values: dict[str, list[str]]) -> R
     return Recipe("chains", sql, desc, answer)
 
 
+# ---------- аномалии (#121) ----------
+
+ANOMALY = re.compile(r"аномал|выброс|необычн\w*\s+(значен|сумм|заказ)|подозрительн", re.IGNORECASE)
+MIN_SAMPLE = 20  # меньше наблюдений в группе — выводу не доверяем
+
+
+def anomaly_recipe(question: str, table: dict) -> Recipe | None:
+    """Выбросы по правилу Тьюки: вне [Q1 − 1,5·IQR; Q3 + 1,5·IQR] внутри каждой группы.
+    Если в вопросе названа сущность («сумма заказов») и в таблице есть её код — сначала
+    сумма по сущности (заказу), потом выбросы среди заказов."""
+    if not ANOMALY.search(question):
+        return None
+    from .semantics import MONEY, money_formula
+
+    names = [c["name"] for c in table.get("columns") or []]
+    numeric = _columns(table, "integer", "decimal")
+    formula = money_formula(names)
+    value = None
+    if formula and MONEY.search(question):
+        value, what = formula[4:-1], "выручка"  # SUM(expr) -> expr
+    else:
+        col = _event_column(question, numeric) or next(
+            (c for c in numeric for t in _tokens(question) if len(t) >= 4 and
+             any(same_word(t, w) for w in _tokens(c))), None)
+        if col:
+            value, what = _q(col), f"«{col}»"
+    if value is None and re.search(r"сумм", question, re.IGNORECASE):
+        if formula:
+            value, what = formula[4:-1], "сумма (количество × цена с учётом скидки)"
+        else:
+            money = [c for c in numeric if re.search(r"руб|сумм|₽", c, re.IGNORECASE)]
+            if money:
+                value, what = _q(money[0]), f"«{money[0]}»"
+    if value is None:
+        return None
+    ids = [c["name"] for c in table.get("columns") or [] if c.get("inferred_type") == "identifier"]
+    entity = next((c for c in ids for t in _tokens(question)
+                   if len(t) >= 4 and any(same_word(t, w) for w in _tokens(c) if len(w) >= 4)), None)
+    group = group_column(question, table)
+    g = f"{_q(group)} AS g, " if group else ""
+    if entity:
+        base = (f"SELECT {g}{_q(entity)} AS e, SUM({value}) AS v FROM t "
+                f"GROUP BY {'g, ' if group else ''}e")
+        unit_desc = f"{what} по каждому «{entity}»"
+    else:
+        base = f"SELECT {g}{value} AS v FROM t WHERE {value} IS NOT NULL"
+        unit_desc = what
+    by = "g" if group else None
+    stats = ("SELECT " + ("g, " if by else "")
+             + "percentile_cont(0.25) WITHIN GROUP (ORDER BY v) AS q1, "
+             "percentile_cont(0.75) WITHIN GROUP (ORDER BY v) AS q3 FROM d WHERE v IS NOT NULL"
+             + (" GROUP BY g" if by else ""))
+    join = " JOIN s USING (g)" if by else " CROSS JOIN s"
+    out_cond = "(d.v < s.q1 - 1.5 * (s.q3 - s.q1) OR d.v > s.q3 + 1.5 * (s.q3 - s.q1))"
+    sql = (f"WITH d AS ({base}), s AS ({stats}) SELECT "
+           + (f"d.g AS {_q(group)}, " if by else "")
+           + f"COUNT(*) AS {_q('Наблюдений')}, "
+           f"ROUND(MIN(s.q1)::numeric, 2) AS {_q('Q1')}, ROUND(MIN(s.q3)::numeric, 2) AS {_q('Q3')}, "
+           f"ROUND(MIN(s.q3 + 1.5 * (s.q3 - s.q1))::numeric, 2) AS {_q('Верхняя граница')}, "
+           f"COUNT(*) FILTER (WHERE {out_cond}) AS {_q('Выбросов')}, "
+           f"ROUND(MAX(d.v)::numeric, 2) AS {_q('Максимум')} "
+           f"FROM d{join} WHERE d.v IS NOT NULL" + (" GROUP BY d.g ORDER BY 6 DESC, 1" if by else ""))
+    desc = (f"значение — {unit_desc}; выброс — вне [Q1 − 1,5·IQR; Q3 + 1,5·IQR] "
+            + (f"внутри каждого «{group}»" if group else "по всем данным")
+            + "; пустые значения не учитываются. Выброс — статистически необычное значение, "
+            f"а не ошибка данных; при меньше {MIN_SAMPLE} наблюдений вывод недостоверен")
+
+    def answer(columns, rows):
+        if not rows:
+            return "Данных для поиска выбросов не нашлось."
+        k = 1 if group else 0
+        small = [r for r in rows if (r[k] or 0) < MIN_SAMPLE]
+        total = sum(r[k + 4] or 0 for r in rows)
+        if group:
+            top = rows[0]
+            text = (f"Выбросов всего {_fmt(total)} из {_fmt(sum(r[1] or 0 for r in rows))} наблюдений. "
+                    f"Больше всего — «{top[0]}»: {_fmt(top[5])} (верхняя граница {_fmt(top[4])}, "
+                    f"максимум {_fmt(top[6])}).")
+        else:
+            r = rows[0]
+            text = (f"Выбросов {_fmt(r[4])} из {_fmt(r[0])} наблюдений; верхняя граница "
+                    f"{_fmt(r[3])}, максимум {_fmt(r[5])}.")
+        if small:
+            text += (" Мало данных (меньше " + str(MIN_SAMPLE) + " наблюдений) — вывод недостоверен: "
+                     + ", ".join(f"«{r[0]}»" if group else "все данные" for r in small) + ".")
+        return text + f" Критерий: {desc}."
+    return Recipe("anomaly", sql, desc, answer)
+
+
 # ---------- выбор ----------
 
 def build(question: str, table: dict, values: dict[str, list[str]] | None = None) -> Recipe | None:
     """Рецепт для вопроса или None. Порядок: цепочки, перцентиль, состояние на дату."""
     for make in (lambda: chains_recipe(question, table, values or {}),
                  lambda: percentile_recipe(question, table),
-                 lambda: asof_recipe(question, table)):
+                 lambda: asof_recipe(question, table),
+                 lambda: anomaly_recipe(question, table)):
         recipe = make()
         if recipe:
             return recipe
@@ -398,4 +489,5 @@ def build(question: str, table: dict, values: dict[str, list[str]] | None = None
 
 def is_recipe_question(question: str) -> bool:
     """Вопрос, похожий на рецепт (для выбора таблицы и отключения прочих эвристик)."""
-    return bool(PERCENTILE.search(question) or CHAINS.search(question) or _asof_date(question))
+    return bool(PERCENTILE.search(question) or CHAINS.search(question) or _asof_date(question)
+                or ANOMALY.search(question))
