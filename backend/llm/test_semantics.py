@@ -472,6 +472,21 @@ class ShareTests(unittest.TestCase):
         self.assertEqual(self.check(q, sql), "")
 
 
+class GroupInSelectTests(unittest.TestCase):
+    """E2E 05.11: GROUP BY без колонки разбивки в SELECT."""
+
+    def test_group_column_required(self):
+        from backend.llm.semantics import Intent, check_sql
+        q = "Какая суммарная стоимость доставки по статусам отправлений?"
+        bad = 'SELECT SUM("Стоимость доставки, руб.") AS "Сумма" FROM t GROUP BY "Статус"'
+        self.assertIn("нет в SELECT", " ".join(check_sql(bad, q, Intent.parse(q), {}, strict=False)))
+        good = 'SELECT "Статус", SUM("Стоимость доставки, руб.") FROM t GROUP BY "Статус"'
+        self.assertEqual(check_sql(good, q, Intent.parse(q), {}), [])
+        month = ('SELECT date_trunc(\'month\', "Дата") AS "Месяц", COUNT(*) FROM t '
+                 'GROUP BY date_trunc(\'month\', "Дата")')
+        self.assertEqual(check_sql(month, "Сколько по месяцам?", Intent.parse("Сколько по месяцам?"), {}), [])
+
+
 class ExtraConditionTests(unittest.TestCase):
     """E2E 30.10: лишний IS NULL и подзапросы к вопросам «без карты»."""
 

@@ -335,6 +335,22 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
             + ", ".join(candidates[:4]) + ". Добавь нужное условие в WHERE."]
 
 
+def _check_group_in_select(sql: str) -> list[str]:
+    """«SELECT SUM(x) FROM t GROUP BY "Статус"» — суммы без подписей групп: непонятно, где
+    какая. Колонка разбивки обязана быть в SELECT (E2E 05.11, ho_delivery_cost_by_status)."""
+    from .kpis import select_items
+    m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
+                  re.IGNORECASE | re.DOTALL)
+    if not m or re.match(r"\s*with\b", sql, re.IGNORECASE):
+        return []
+    selected = " ".join(select_items(sql))
+    missing = [c for c in re.findall(r'"([^"]+)"', m.group(1)) if f'"{c}"' not in selected]
+    if missing:
+        return [f"Колонка разбивки \"{missing[0]}\" есть в GROUP BY, но её нет в SELECT — "
+                f"добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
+    return []
+
+
 def _check_extra_conditions(sql: str, question: str, ignore: set[str] | None,
                             strict: bool = True) -> list[str]:
     """Условия, которых нет в вопросе (E2E): «"Код покупателя" IS NULL» к вопросу «без карты»
@@ -428,6 +444,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if not re.search(r"\bfrom\s+t\b", low):
         problems.append("Запрос должен брать данные из таблицы t.")
 
+    problems += _check_group_in_select(sql)
     problems += _check_share(sql, question, intent, values, ignore)
     problems += _check_extra_conditions(sql, question, ignore, strict)
     if columns:
