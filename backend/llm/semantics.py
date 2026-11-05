@@ -341,7 +341,7 @@ def _check_extra_conditions(sql: str, question: str, ignore: set[str] | None,
     и подзапросы «NOT IN (SELECT …)» вместо простого фильтра по значению.
     Подзапрос отклоняем на всех попытках: лучше честное «не получилось», чем неверное число."""
     problems = []
-    if re.search(r"\(\s*select\b", sql, re.IGNORECASE):
+    if re.search(r"\b(in|exists|any|all)\s*\(\s*select\b|[=<>]\s*\(\s*select\b", sql, re.IGNORECASE):
         problems.append("Не используй подзапросы: фильтруй прямо по значению категории — "
                         "WHERE \"колонка\" = 'значение'.")
     if not strict:

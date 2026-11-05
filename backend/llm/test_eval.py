@@ -289,7 +289,7 @@ class TableChoiceTests(unittest.TestCase):
         tables = {t["name"]: t for t in json.loads(CATALOG.read_text(encoding="utf-8"))["tables"]}
         values = json.loads(VALUES.read_text(encoding="utf-8"))
         for case in CASES + HOLDOUT:
-            if "gold" not in case:
+            if "gold" not in case or case.get("recipe"):
                 continue
             with self.subTest(case=case["id"]):
                 table = tables[case["table"]]

@@ -31,6 +31,7 @@ from . import advanced_analytics as adv
 from . import compare as cmp
 from . import glossary as gl
 from . import kpis as kp
+from . import recipes as rc
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -1006,6 +1007,28 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if values is None:
         values = runner.category_values(table)
     column_names = [c["name"] for c in table.get("columns") or []]
+
+    # 5a. Готовый расчёт по шаблону (#112–#114): перцентиль, состояние на дату, цепочки.
+    # SQL строит код из колонок таблицы — модель тут не нужна и не может ошибиться.
+    recipe = None if periods and len(periods) > 1 else rc.build(full_question, table, values)
+    if recipe:
+        say(f"Готовый расчёт: {recipe.description}")
+        try:
+            sql = validate_sql(recipe.sql, column_names)
+            result = runner.run(table, sql)
+        except Exception as exc:  # не вышло — дальше обычным путём, через модель
+            say(f"Шаблон не сработал ({str(exc).splitlines()[0]}) — пишу SQL обычным путём")
+            trace["errors"].append(f"recipe: {exc}")
+        else:
+            trace.update(sql=sql, columns=result.columns, rows=result.rows, recipe=recipe.kind,
+                         attempts=0)
+            state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
+            response = _result_response(result, sql, table, None, full_question)
+            response.pop("_note", None)
+            response["answer"] = recipe.answer(result.columns, result.rows)
+            response["table_name"] = table["name"]
+            return response
+
     numeric_columns = [c["name"] for c in table.get("columns") or []
                        if column_kind(c) in ("integer", "decimal")]
     table_words = words(display_table_name(table["name"]))
