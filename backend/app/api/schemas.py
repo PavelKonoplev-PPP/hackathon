@@ -80,6 +80,15 @@ class ExecutionStep(BaseModel):
     timestamp: str | None = None
 
 
+class GeneratedDashboard(BaseModel):
+    """Dashboard built from a single text request (Issue #117)."""
+
+    id: str
+    title: str
+    widget_count: int
+    failed: list[dict[str, str]] = Field(default_factory=list)
+
+
 class ChatResponse(BaseModel):
     """Full chat response schema matching docs/api-contract.md with BI-07 status tracking."""
 
@@ -92,6 +101,7 @@ class ChatResponse(BaseModel):
     status: str = "completed"
     steps: list[ExecutionStep] = Field(default_factory=list)
     execution_time_ms: float | None = None
+    dashboard: GeneratedDashboard | None = None
 
 
 # Schema / Catalog endpoint schemas (/api/schema conforming to Issue #39)
@@ -258,6 +268,7 @@ class DashboardWidget(BaseModel):
     chart: ChartSpec | None = None
     table: TableSpec | None = None
     answer: str | None = None
+    source_table: str | None = None
     grid: dict[str, Any] | None = None
 
 
@@ -342,7 +353,7 @@ class JobStatusResponse(BaseModel):
     message: str
     datasource_id: str | None = "raw"
     table_name: str | None = None
-    status: Literal["pending", "running", "completed", "failed"] = "pending"
+    status: Literal["pending", "running", "completed", "failed", "cancelled"] = "pending"
     current_step: str | None = None
     progress_pct: int = 0
     steps: list[ExecutionStep] = Field(default_factory=list)

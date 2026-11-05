@@ -645,6 +645,27 @@ def create_dashboard_endpoint(body: DashboardCreateRequest) -> DashboardDetail:
         ) from exc
 
 
+@router.post("/api/dashboards/generate", response_model=JobCreateResponse, status_code=202)
+@router.post("/dashboards/generate", response_model=JobCreateResponse, status_code=202)
+def generate_dashboard_endpoint(
+    body: ChatRequest,
+    background_tasks: BackgroundTasks,
+) -> JobCreateResponse:
+    """Build a dashboard from one text request (Issue #117). Progress: GET /api/chat/jobs/{id}."""
+    job = query_tracker.create_job(
+        message=body.message,
+        session_id=body.session_id,
+        datasource_id=body.datasource_id,
+        table_name=body.table_name,
+    )
+    background_tasks.add_task(query_tracker.execute_dashboard_job_worker, job.job_id)
+    return JobCreateResponse(
+        job_id=job.job_id,
+        status="pending",
+        message="Dashboard generation job submitted successfully",
+    )
+
+
 @router.get("/api/dashboards/{dashboard_id}", response_model=DashboardDetail)
 @router.get("/dashboards/{dashboard_id}", response_model=DashboardDetail)
 def get_dashboard_endpoint(dashboard_id: str) -> DashboardDetail:
@@ -788,6 +809,13 @@ def get_query_job_endpoint(job_id: str) -> JobStatusResponse:
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     return job
+
+
+@router.post("/api/chat/jobs/{job_id}/cancel", status_code=204)
+def cancel_query_job_endpoint(job_id: str) -> None:
+    """Stop a job: its result is discarded, a generated dashboard is not saved."""
+    if not query_tracker.cancel_job(job_id):
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
 
 
 @router.get("/api/chat/jobs", response_model=list[JobStatusResponse])

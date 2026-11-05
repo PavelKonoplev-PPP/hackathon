@@ -362,6 +362,8 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
   min-width: 0; max-width: 320px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border);
   background: var(--surface); color: var(--text); font: inherit; font-size: 13px;
 }
+.widget-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; padding-right: 14px; }
+.widget-sql { flex: 1; margin: 0; overflow: auto; white-space: pre-wrap; }
 .widget-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .widget .chart { height: auto; }
 .widget .view-switch button { padding: 3px 8px; font-size: 12px; }

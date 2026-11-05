@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { abortable, sendMessage } from './api.js'
+import { abortable, generateDashboard, sendMessage } from './api.js'
 import { detectMergeRequest, detectViewRequest, mergeCharts, mergeProblem, pieProblem, viewPhrase } from './chartViews.js'
-import { askedTextFor, createDashboardFromMessages, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
+import { askedTextFor, createDashboardFromMessages, dashboardHasSubject, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
 import { dashboardHref } from './router.js'
 import { queriesApi } from './queriesApi.js'
 
@@ -158,7 +158,13 @@ export function useConversations({ onDashboardCreated } = {}) {
       return
     }
 
-    // «Собери дашборд»: агент дашборды не строит, собираем из результатов диалога на фронтенде.
+    // «Создай дашборд по продажам»: сервер сам строит план и виджеты (#117).
+    if (detectDashboardRequest(message) && dashboardHasSubject(message)) {
+      await askForDashboard(conv, message, userMsg)
+      return
+    }
+
+    // «Собери дашборд»: собираем из результатов диалога на фронтенде.
     if (detectDashboardRequest(message)) {
       update(id, (c) => ({
         ...c,
@@ -171,8 +177,8 @@ export function useConversations({ onDashboardCreated } = {}) {
         reply = {
           id: uuid(),
           role: 'assistant',
-          text: 'Дашборд собирается из графиков и таблиц этого диалога, а их пока нет. Задайте сначала несколько вопросов к данным.',
-          clarification: { question: 'Например:', options: ['Продажи по каналам', 'Динамика продаж по месяцам', 'Опиши данные'] },
+          text: 'В этом диалоге пока нет графиков и таблиц. Скажите, о чём должен быть дашборд, и я соберу его с нуля.',
+          clarification: { question: 'Например:', options: ['Создай дашборд по продажам с выручкой, динамикой и каналами', 'Создай дашборд по технической поддержке', 'Опиши данные'] },
         }
       } else {
         try {
@@ -253,6 +259,35 @@ export function useConversations({ onDashboardCreated } = {}) {
       botMsg = botFromResult(reply)
     } catch (e) {
       botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось получить ответ: ${e.message}` }
+    } finally {
+      controllers.current.delete(id)
+    }
+    update(id, (c) => ({ ...c, messages: [...c.messages, botMsg], updatedAt: Date.now() }))
+    stopLoading(id)
+  }
+
+  // Дашборд с нуля: те же этапы и «Остановить», что у вопроса агенту; ответ — ссылка на дашборд.
+  async function askForDashboard(conv, message, userMsg) {
+    const id = conv.id
+    update(id, (c) => ({ ...c, title: withTitle(c, userMsg.text), messages: [...c.messages, userMsg], updatedAt: Date.now() }))
+    startLoading(id)
+    const ctrl = new AbortController()
+    controllers.current.set(id, ctrl)
+    let botMsg
+    try {
+      const reply = await generateDashboard(conv.sessionId, message, {
+        datasourceId: conv.datasourceId,
+        tableName: conv.tableName,
+        onProgress: (p) => setProgress((s) => ({ ...s, [id]: p })),
+        signal: ctrl.signal,
+      })
+      botMsg = botFromResult(reply, {
+        error: reply.status === 'failed',
+        link: reply.dashboard ? { href: dashboardHref(reply.dashboard.id), label: 'Открыть дашборд' } : null,
+      })
+      if (reply.dashboard) onCreatedRef.current?.()
+    } catch (e) {
+      botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось собрать дашборд: ${e.message}` }
     } finally {
       controllers.current.delete(id)
     }
