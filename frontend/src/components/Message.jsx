@@ -37,7 +37,7 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
             split={split}
             onToggleSplit={onPatch ? () => onPatch(msg.id, { split: !split }) : undefined}
             extraFor={(part) => (
-              <AddToDashboard result={{ title: part.title, text: msg.text, chart: part, table: null, sql: msg.sql, view: msg.view, datasourceId }} />
+              <AddToDashboard result={{ title: part.title, text: msg.text, chart: part, table: null, sql: msg.sql, view: msg.view, tableName: msg.tableName, datasourceId }} />
             )}
             title={title}
             extraTable
@@ -71,7 +71,7 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
               </button>
             )}
             {hasResult && (
-              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, split, datasourceId }} />
+              <AddToDashboard result={{ title, text: msg.text, chart: msg.chart, table: msg.table, sql: msg.sql, view: msg.view, split, tableName: msg.tableName, datasourceId }} />
             )}
             {hasResult && msg.sql && (
               <SaveQueryButton result={{ title, question, sql: msg.sql, chart: msg.chart, view: msg.view, datasourceId, tableName: msg.tableName || tableName }} />

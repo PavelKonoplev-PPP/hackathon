@@ -169,7 +169,7 @@ def update_job_step(
     """Update execution progress for a specific job."""
     with _LOCK:
         job = _JOBS.get(job_id)
-        if not job or job["status"] in ("completed", "failed"):
+        if not job or job["status"] in ("completed", "failed", "cancelled"):
             return
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -194,11 +194,38 @@ def update_job_step(
         existing_steps.append(step_obj)
 
 
+def set_job_progress(job_id: str, pct: int) -> None:
+    """Set an explicit progress percentage for jobs outside the standard pipeline."""
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if job and job["status"] not in ("completed", "failed", "cancelled"):
+            job["progress_pct"] = max(0, min(99, pct))
+
+
+def cancel_job(job_id: str) -> bool:
+    """Ask a running job to stop. Returns False when the job is unknown."""
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return False
+        if job["status"] in ("pending", "running"):
+            job["status"] = "cancelled"
+            job["current_step"] = "Остановлено"
+            job["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return True
+
+
+def is_job_cancelled(job_id: str) -> bool:
+    with _LOCK:
+        job = _JOBS.get(job_id)
+        return bool(job and job["status"] == "cancelled")
+
+
 def finish_job(job_id: str, result: ChatResponse) -> None:
     """Mark a job as successfully completed with final ChatResponse."""
     with _LOCK:
         job = _JOBS.get(job_id)
-        if not job:
+        if not job or job["status"] == "cancelled":
             return
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -232,7 +259,7 @@ def fail_job(job_id: str, error_message: str) -> None:
     """Mark a job as failed with error details."""
     with _LOCK:
         job = _JOBS.get(job_id)
-        if not job:
+        if not job or job["status"] == "cancelled":
             return
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -287,3 +314,38 @@ def execute_job_worker(job_id: str) -> None:
         logger.exception("Error executing async query job %s: %s", job_id, exc)
         recorder.finish(final_status="failed")
         fail_job(job_id, str(exc))
+
+
+def execute_dashboard_job_worker(job_id: str) -> None:
+    """Build a dashboard from a text request in a background thread (Issue #117)."""
+    with _LOCK:
+        job = _JOBS.get(job_id)
+    if not job:
+        return
+
+    from .dashboard_builder import build_dashboard
+
+    recorder = StepRecorder(job_id=job_id)
+
+    def on_step(title: str, pct: int) -> None:
+        recorder.step("dashboard", title)
+        set_job_progress(job_id, pct)
+
+    try:
+        result = build_dashboard(
+            job["message"],
+            datasource_id=job["datasource_id"],
+            table_name=job["table_name"],
+            on_step=on_step,
+            is_cancelled=lambda: is_job_cancelled(job_id),
+        )
+        recorder.finish(final_status="completed")
+        finish_job(job_id, ChatResponse(**{
+            **result,
+            "steps": recorder.steps,
+            "execution_time_ms": recorder.total_duration_ms,
+        }))
+    except Exception as exc:
+        logger.exception("Error building dashboard in job %s: %s", job_id, exc)
+        recorder.finish(final_status="failed")
+        fail_job(job_id, "Не удалось собрать дашборд. Попробуйте ещё раз.")

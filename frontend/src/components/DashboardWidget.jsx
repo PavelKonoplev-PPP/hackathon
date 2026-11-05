@@ -7,6 +7,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 // Виджет дашборда: перетаскивание за ⋮⋮, изменение размера за угол (BI-18), переименование (BI-23).
 export default function DashboardWidget({ widget, shown, filtered, unfiltered, gridRef, dragging, dropTarget, onPatch, onCommit, onRemove, onMove, dnd }) {
   const [editing, setEditing] = useState(false)
+  const [showSql, setShowSql] = useState(false)
   const w = widget.grid?.w || 6
   const h = widget.grid?.h || 2
   const empty = filtered && !(shown.chart?.categories?.length || shown.table?.rows?.length)
@@ -84,7 +85,9 @@ export default function DashboardWidget({ widget, shown, filtered, unfiltered, g
         </button>
       </header>
       <div className="widget-body">
-        {empty ? (
+        {showSql ? (
+          <pre className="sql-code widget-sql">{widget.sql}</pre>
+        ) : empty ? (
           <p className="muted small">Нет данных за выбранный период.</p>
         ) : shown.chart || shown.table ? (
           <ResultView
@@ -101,6 +104,16 @@ export default function DashboardWidget({ widget, shown, filtered, unfiltered, g
           <p className="text">{widget.answer || 'Пустой виджет'}</p>
         )}
       </div>
+      {(widget.source_table || widget.sql) && (
+        <footer className="widget-foot muted small">
+          {widget.source_table && <span>Источник: {widget.source_table}</span>}
+          {widget.sql && (
+            <button className="link widget-foot-sql" onClick={() => setShowSql((v) => !v)}>
+              {showSql ? 'Скрыть SQL' : 'SQL'}
+            </button>
+          )}
+        </footer>
+      )}
       <span className="resize-handle" onPointerDown={startResize} title="Потяните, чтобы изменить размер" aria-hidden="true" />
     </section>
   )

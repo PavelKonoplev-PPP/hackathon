@@ -5,6 +5,20 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const MOCK_STEPS = ['Анализ намерения и безопасности', 'Выбор таблицы и сопоставление схемы', 'Генерация аналитического SQL', 'Выполнение запроса', 'Подготовка ответа']
 
+// Демо-режим: дашборд из трёх демо-ответов, сохраняется в браузере.
+export async function mockDashboard(message, onProgress) {
+  const { dashboardsApi, widgetFromResult } = await import('./dashboardsApi.js')
+  const questions = ['Продажи по каналам', 'Динамика продаж по месяцам', 'Топ товаров по выручке']
+  const widgets = []
+  for (const [i, q] of questions.entries()) {
+    onProgress?.({ step: `Виджет ${i + 1} из ${questions.length}: ${q}`, pct: 10 + i * 30 })
+    const r = await mockReply(q)
+    widgets.push(widgetFromResult({ title: q, text: r.answer, chart: r.chart, table: r.table, sql: r.sql }))
+  }
+  const d = await dashboardsApi.create({ title: `Дашборд: ${message.slice(0, 40)}`, description: `Создан по запросу: ${message}`, widgets })
+  return { answer: `Собрал дашборд «${d.title}». Виджетов: ${widgets.length}.`, status: 'completed', dashboard: { id: d.id, title: d.title, widget_count: widgets.length, failed: [] } }
+}
+
 export async function mockReply(message, onProgress) {
   for (let i = 0; i < MOCK_STEPS.length; i++) {
     onProgress?.({ step: MOCK_STEPS[i], pct: Math.round(((i + 1) / MOCK_STEPS.length) * 95) })

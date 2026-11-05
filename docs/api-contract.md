@@ -314,6 +314,24 @@
 
 Ответ (HTTP 201 Created): возвращает полный объект `DashboardDetail` с присвоенным `id`.
 
+### 2а. POST /api/dashboards/generate (алиас: POST /dashboards/generate)
+
+Дашборд с нуля по одному текстовому запросу. Тело — как у `POST /api/chat` (`session_id`, `message`,
+необязательные `datasource_id`, `table_name`). Ответ `202` с `job_id`; ход и результат —
+`GET /api/chat/jobs/{job_id}`, остановка — `POST /api/chat/jobs/{job_id}/cancel` (`204`, дашборд не сохраняется).
+
+План строится по каталогу и словам запроса, модель его дополняет. Каждый виджет считает обычный агент
+с проверками SQL, каждый виджет содержит `sql` и `source_table`. Дашборд сохраняется, только если
+верных виджетов не меньше 3. В `result.status`:
+
+| Статус | Что значит |
+|---|---|
+| `completed` | дашборд сохранён: `result.dashboard` = `{id, title, widget_count, failed: [{question, reason}]}` |
+| `clarification` | нужно выбрать таблицу: варианты в `result.clarification.options` |
+| `failed` | дашборд не создан: причина в `result.answer` |
+| `refused` | запрос на изменение данных или показатель вне данных |
+| `cancelled` | сборка остановлена, дашборд не сохранён |
+
 ### 3. GET /api/dashboards/{dashboard_id} (алиас: GET /dashboards/{dashboard_id})
 
 Загрузка полной конфигурации дашборда со всеми виджетами по идентификатору.

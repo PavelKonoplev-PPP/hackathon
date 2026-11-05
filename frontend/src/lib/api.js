@@ -6,6 +6,7 @@ export const isMock = USE_MOCK
 
 const POLL_MS = 700
 const JOB_TIMEOUT_MS = 180000
+const DASHBOARD_TIMEOUT_MS = 480000
 export const MAX_CSV_BYTES = 100 * 1024 * 1024
 
 const UNAVAILABLE = 'сервер недоступен, проверьте, что бэкенд запущен'
@@ -87,18 +88,40 @@ export async function sendMessage(sessionId, message, { datasourceId = null, tab
     if (e.status === 404 || e.status === 405) return request('/chat', { method: 'POST', body, signal })
     throw e
   }
+  return pollJob(job.job_id, { onProgress, signal })
+}
+
+// Опрос фоновой задачи: этапы — в onProgress, результат — когда задача завершится.
+async function pollJob(jobId, { onProgress, signal, timeoutMs = JOB_TIMEOUT_MS }) {
   const started = Date.now()
   for (let i = 0; ; i++) {
     await pause(i === 0 ? 250 : POLL_MS, signal) // первый опрос быстрее: короткие ответы приходят сразу
-    const st = await request(`/chat/jobs/${encodeURIComponent(job.job_id)}`, { signal })
+    const st = await request(`/chat/jobs/${encodeURIComponent(jobId)}`, { signal })
     onProgress?.({ step: st.current_step, pct: st.progress_pct, steps: st.steps })
     if (st.status === 'completed' && st.result) {
       return { ...st.result, execution_time_ms: st.result.execution_time_ms ?? st.execution_time_ms }
     }
     if (st.status === 'failed') throw new Error(st.error || 'Запрос завершился ошибкой')
-    if (Date.now() - started > JOB_TIMEOUT_MS) {
-      throw new Error('Запрос выполняется слишком долго (больше 3 минут). Попробуйте сформулировать его проще или уже.')
+    if (Date.now() - started > timeoutMs) {
+      throw new Error(`Запрос выполняется слишком долго (больше ${Math.round(timeoutMs / 60000)} минут). Попробуйте сформулировать его проще или уже.`)
     }
+  }
+}
+
+// Дашборд с нуля по одному запросу (#117): сервер строит план и виджеты, этапы — как у вопроса агенту.
+// «Остановить» отменяет задачу на сервере: дашборд не сохранится.
+export async function generateDashboard(sessionId, message, { datasourceId = null, tableName = null, onProgress, signal } = {}) {
+  if (USE_MOCK) {
+    const { mockDashboard } = await import('./mock.js')
+    return abortable(mockDashboard(message, onProgress), signal)
+  }
+  const body = chatBody(sessionId, message, datasourceId, tableName)
+  const job = await request('/dashboards/generate', { method: 'POST', body, signal })
+  try {
+    return await pollJob(job.job_id, { onProgress, signal, timeoutMs: DASHBOARD_TIMEOUT_MS })
+  } catch (e) {
+    request(`/chat/jobs/${encodeURIComponent(job.job_id)}/cancel`, { method: 'POST' }).catch(() => {})
+    throw e
   }
 }
 

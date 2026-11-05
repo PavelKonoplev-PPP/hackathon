@@ -77,7 +77,7 @@ export const dashboardsApi = isMock ? local : remote
 export const shortId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 8)
 
 // Виджет из ответа агента. Вид графика и размер храним в grid (бэкенд сохраняет его как есть).
-export function widgetFromResult({ title, text, chart, table, sql, view, split }) {
+export function widgetFromResult({ title, text, chart, table, sql, view, split, tableName }) {
   const kpis = !chart && deriveKpis(table)
   return {
     id: shortId(),
@@ -87,6 +87,7 @@ export function widgetFromResult({ title, text, chart, table, sql, view, split }
     chart: chart || null,
     table: table || null,
     answer: text || null,
+    source_table: tableName ? tableTitle(tableName) : null,
     grid: { w: 6, h: kpis ? 1 : 2, view: view || null, ...(split ? { split: true } : {}) },
   }
 }
@@ -135,10 +136,23 @@ export async function createDashboardFromMessages(title, messages, datasourceId 
   return dashboardsApi.create({ title, description: 'Собран автоматически из диалога', datasource_id: datasourceId || 'raw', widgets })
 }
 
+// «data_01_Продажи» → «Продажи»
+const tableTitle = (name) => String(name).replace(/^data_\d+_/, '').replace(/_/g, ' ')
+
 const DASH_WORD = /дашборд|панел[ьи]/
 const CREATE_WORD = /созда|сдела|собер|собра|построй|сформир/
 
 export function detectDashboardRequest(text) {
   const t = text.toLowerCase()
   return DASH_WORD.test(t) && CREATE_WORD.test(t)
+}
+
+const FROM_DIALOG = /(из|по)\s+(эт\w+\s+|наш\w+\s+|текущ\w+\s+)?(диалог|чат|график|результат|ответ)|эт\w+\s+(диалог|чат|график|результат)/
+const COMMAND_WORDS = /дашборд\w*|панел[ьи]\w*|созда\w*|сдела\w*|собер\w*|собра\w*|построй\w*|сформир\w*|нов\w+|мне|пожалуйста|быстро|можешь|можно|надо|нужн\w+/g
+
+// Сказано, о чём дашборд («по продажам с выручкой») — строим с нуля. «Собери дашборд» — из диалога.
+export function dashboardHasSubject(text) {
+  const t = text.toLowerCase()
+  if (FROM_DIALOG.test(t)) return false
+  return /[а-яёa-z]{3,}/.test(t.replace(COMMAND_WORDS, ' '))
 }

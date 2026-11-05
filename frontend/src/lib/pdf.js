@@ -11,7 +11,7 @@ const GAP_MM = 4
 const MAX_CANVAS_AREA = 12_000_000 // с запасом ниже лимита Safari (≈16,7 млн пикселей)
 
 // Элементы управления в PDF не нужны.
-const SKIP = ['drag-handle', 'dialog-act', 'resize-handle', 'result-export', 'view-switch', 'split-head', 'mini']
+const SKIP = ['drag-handle', 'dialog-act', 'resize-handle', 'result-export', 'view-switch', 'split-head', 'mini', 'widget-foot-sql']
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
