@@ -129,6 +129,7 @@ export default function Chat({ conversation, loading, progress, onSend, onStop, 
               onMerge={onMerge ? (a, b) => onMerge(conversation.id, a, b) : undefined}
               onSplitBy={onSplitBy ? (msgId, col) => onSplitBy(conversation.id, msgId, col) : undefined}
               busy={loading}
+              isLast={i === conversation.messages.length - 1}
             />
           )
         })}

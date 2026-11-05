@@ -97,7 +97,7 @@ class ApiTests(unittest.TestCase):
             json={"session_id": "test-session-2", "message": "Любой вопрос"},
         )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("LLM offline", response.json()["detail"])
+        self.assertNotIn("LLM offline", response.json()["detail"])  # технические детали только в логе
 
     def test_chat_rejects_empty_message(self) -> None:
         response = self.client.post(
@@ -405,7 +405,8 @@ class ApiTests(unittest.TestCase):
             json={"session_id": "test-db-down", "message": "Какая выручка по каналам продаж?"},
         )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Не удалось подключиться к базе данных под bi_reader", response.json()["detail"])
+        self.assertIn("База данных сейчас недоступна", response.json()["detail"])
+        self.assertNotIn("bi_reader", response.json()["detail"])
 
     @patch.object(agent, "get_reader_connection", return_value=MagicMock())
     @patch.object(agent, "answer_question", side_effect=Exception("Ollama connection refused"))
@@ -418,7 +419,7 @@ class ApiTests(unittest.TestCase):
             json={"session_id": "test-llm-fail", "message": "Какая выручка по каналам продаж?"},
         )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Ошибка при ответе на вопрос", response.json()["detail"])
+        self.assertNotIn("Ollama", response.json()["detail"])
 
     def test_chat_request_schema_supports_optional_scoping(self) -> None:
         """Issue #40 / BI-12: ChatRequest schema supports optional datasource_id and table_name."""

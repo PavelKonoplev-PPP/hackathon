@@ -60,6 +60,7 @@ class LLMClient:
             base_url=self.settings.base_url,
             api_key=self.settings.api_key,
             timeout=self.settings.timeout,
+            max_retries=0,  # повторы умножают ожидание: время задачи ограничено, повторяет пользователь
         )
 
     def chat(self, messages: list[dict], *, temperature: float = 0.2,

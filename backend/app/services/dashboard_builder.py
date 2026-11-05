@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from ..api.schemas import DashboardCreateRequest, DashboardWidget
 from . import agent, dashboards
+from .query_tracker import StepRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,7 @@ def build_dashboard(
     ask: Callable[..., dict] | None = None,
     on_step: Callable[[str, int], None] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    check: Callable[[], None] | None = None,
     budget_s: float = TIME_BUDGET_S,
 ) -> dict:
     """Собрать и сохранить дашборд. Результат — поля ChatResponse."""
@@ -329,7 +331,8 @@ def build_dashboard(
         say(f"Виджет {done} из {total}: {question}", min(92, 10 + int(80 * (done - 1) / total)))
         session_id = f"dash-{uuid.uuid4().hex[:12]}"
         try:
-            res = ask(question, session_id=session_id, datasource_id=datasource_id, table_name=source)
+            res = ask(question, session_id=session_id, datasource_id=datasource_id, table_name=source,
+                      recorder=StepRecorder(check=check))
         except Exception as exc:  # noqa: BLE001 — причину не показываем: в ней могут быть детали подключения
             logger.warning("Виджет дашборда «%s» не построен: %s", question, exc)
             failed.append({"question": question, "reason": "ошибка при расчёте"})

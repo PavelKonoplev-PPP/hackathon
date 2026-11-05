@@ -130,9 +130,11 @@ def chat_endpoint(body: ChatRequest) -> ChatResponse:
         )
         return ChatResponse(**result)
     except (LLMError, agent.AgentServiceError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Chat failed: %s", exc)
+        raise HTTPException(status_code=503, detail=query_tracker.user_error_message(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {exc}") from exc
+        logger.exception("Chat failed: %s", exc)
+        raise HTTPException(status_code=500, detail=query_tracker.user_error_message(exc)) from exc
 
 
 @router.get("/api/schema", response_model=SchemaResponse)
@@ -657,6 +659,7 @@ def generate_dashboard_endpoint(
         session_id=body.session_id,
         datasource_id=body.datasource_id,
         table_name=body.table_name,
+        timeout_s=query_tracker.DASHBOARD_JOB_TIMEOUT_S,
     )
     background_tasks.add_task(query_tracker.execute_dashboard_job_worker, job.job_id)
     return JobCreateResponse(
@@ -856,7 +859,8 @@ def stream_chat_endpoint(
             yield f"data: {json.dumps({'type': 'result', 'data': chat_resp.model_dump()})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            logger.warning("Chat stream failed: %s", exc)
+            yield f"data: {json.dumps({'type': 'error', 'message': query_tracker.user_error_message(exc)})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
