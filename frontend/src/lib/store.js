@@ -22,6 +22,14 @@ function makeTitle(text) {
   return clean.length > TITLE_MAX ? clean.slice(0, TITLE_MAX - 1) + '…' : clean
 }
 
+// Страницу обновили, пока шёл ответ: он не дойдёт. Говорим об этом и даём повторить вопрос.
+function markLostAnswer(c) {
+  const last = c.messages?.[c.messages.length - 1]
+  if (last?.role !== 'user') return c
+  const note = { id: uuid(), role: 'assistant', stopped: true, retryText: last.text, text: 'Ответ не дошёл: страница обновилась, пока он готовился.' }
+  return { ...c, messages: [...c.messages, note] }
+}
+
 function load() {
   try {
     const raw = localStorage.getItem(KEY)
@@ -31,7 +39,7 @@ function load() {
         const activeId = parsed.conversations.some((c) => c.id === parsed.activeId)
           ? parsed.activeId
           : parsed.conversations[0].id
-        return { conversations: parsed.conversations, activeId }
+        return { conversations: parsed.conversations.map(markLostAnswer), activeId }
       }
     }
   } catch {
@@ -233,10 +241,11 @@ export function useConversations({ onDashboardCreated } = {}) {
   const withTitle = (c, text) => (c.messages.length === 0 && c.title === NEW_TITLE ? makeTitle(text) : c.title)
 
   // Вопрос агенту: этапы выполнения приходят в progress, ответ — в тот же диалог.
-  const stoppedMsg = () => ({
+  const stoppedMsg = (retryText) => ({
     id: uuid(),
     role: 'assistant',
     stopped: true,
+    retryText,
     text: 'Ответ остановлен. Можно задать вопрос заново или переформулировать его.',
   })
 
@@ -258,7 +267,7 @@ export function useConversations({ onDashboardCreated } = {}) {
       })
       botMsg = botFromResult(reply)
     } catch (e) {
-      botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось получить ответ: ${e.message}` }
+      botMsg = e.name === 'AbortError' ? stoppedMsg(userMsg.text) : { id: uuid(), role: 'assistant', error: true, retryText: userMsg.text, text: `Не удалось получить ответ: ${e.message}` }
     } finally {
       controllers.current.delete(id)
     }
@@ -283,11 +292,12 @@ export function useConversations({ onDashboardCreated } = {}) {
       })
       botMsg = botFromResult(reply, {
         error: reply.status === 'failed',
+        retryText: reply.status === 'failed' ? userMsg.text : undefined,
         link: reply.dashboard ? { href: dashboardHref(reply.dashboard.id), label: 'Открыть дашборд' } : null,
       })
       if (reply.dashboard) onCreatedRef.current?.()
     } catch (e) {
-      botMsg = e.name === 'AbortError' ? stoppedMsg() : { id: uuid(), role: 'assistant', error: true, text: `Не удалось собрать дашборд: ${e.message}` }
+      botMsg = e.name === 'AbortError' ? stoppedMsg(userMsg.text) : { id: uuid(), role: 'assistant', error: true, retryText: userMsg.text, text: `Не удалось собрать дашборд: ${e.message}` }
     } finally {
       controllers.current.delete(id)
     }

@@ -9,7 +9,7 @@ import { useCategoryColumns } from '../lib/schemaCache.js'
 
 const hasResultCheck = (m) => !m.error && Boolean(m.chart || m.table)
 
-export default function Message({ msg, question, askedText = '', datasourceId, tableName, mergeOptions = [], onMerge, onSplitBy, busy = false, onPickOption, onChangeView, onPatch }) {
+export default function Message({ msg, question, askedText = '', datasourceId, tableName, mergeOptions = [], onMerge, onSplitBy, busy = false, isLast = false, onPickOption, onChangeView, onPatch }) {
   const [showSql, setShowSql] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = Array.isArray(msg.steps) ? msg.steps : []
@@ -48,6 +48,12 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
           <a className="link-btn" href={msg.link.href}>
             {msg.link.label}
           </a>
+        )}
+
+        {msg.retryText && isLast && !busy && (
+          <button className="link-btn retry-btn" onClick={() => onPickOption(msg.retryText)}>
+            Повторить запрос
+          </button>
         )}
 
         {msg.clarification && (
