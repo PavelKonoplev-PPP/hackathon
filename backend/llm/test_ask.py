@@ -397,6 +397,47 @@ class AnswerTests(unittest.TestCase):
         q = "Сколько событий на каждой платформе?"
         self.assertEqual(unit_options(q, Intent.parse(q), table), [])
 
+    def test_count_background_jobs_by_status_no_spurious_unit_question(self):
+        """75/75 API regression: counted entity includes adjective 'фоновых'."""
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        table = {"name": "data_08_Фоновые_задания", "columns": [
+            {"name": "Код задания", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 200},
+            {"name": "Код запуска", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 180},
+            {"name": "Статус", "inferred_type": "category",
+             "sample_rows": 200, "sample_distinct": 4},
+        ]}
+        question = "Сколько фоновых заданий в каждом статусе?"
+        self.assertEqual(unit_options(question, Intent.parse(question), table), [])
+        # No model text is needed for the unit decision. Continue to ordinary
+        # SQL generation, not to clarification about job positions.
+        from backend.llm.ask import answer_question, _SESSIONS
+        _SESSIONS.clear()
+        sql = 'SELECT "Статус", COUNT(*) FROM t GROUP BY "Статус"'
+        runner = FakeRunner(rows=[("Готово", 8), ("Ошибка", 2)],
+                            columns=["Статус", "Количество"])
+        client = ScriptedClient(["\`\`\`sql\\n" + sql + "\\n\`\`\`", "Количество по статусам."])
+        trace = {}
+        response = answer_question(question, {"schema": "raw", "tables": [table]},
+                                   runner, client=client, trace=trace)
+        self.assertIsNone(response.get("clarification"))
+        self.assertIn("GROUP BY", response.get("sql", ""))
+        self.assertEqual(trace.get("table"), table["name"])
+        self.assertNotEqual(trace.get("clarification"), "unit")
+
+    def test_unit_question_not_bypassed_by_unrelated_group_identifier(self):
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        table = {"name": "data_01_Продажи", "columns": [
+            {"name": "Код позиции", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 300},
+            {"name": "Код заказа", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 280},
+        ]}
+        self.assertTrue(unit_options("Сколько продаж по заказам?", Intent.parse("Сколько продаж по заказам?"), table))
+
     def test_unit_clarification(self):
         result, _, trace = ask("Сколько продаж через интернет-магазин?", [], session="s2")
         self.assertEqual(trace["clarification"], "unit")
