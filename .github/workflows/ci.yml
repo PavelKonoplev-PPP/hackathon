@@ -68,3 +68,31 @@ jobs:
         run: npm test
       - name: Build React application
         run: npm run build
+
+postgresql-date-audit-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bi_ci_tester
+          POSTGRES_PASSWORD: ci_ephemeral_password_only
+          POSTGRES_DB: bi_ci_date_audit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U bi_ci_tester -d bi_ci_date_audit"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PostgreSQL client dependencies
+        run: python -m pip install -r db/requirements.txt
+      - name: Audit actual PG16 date boundaries in an ephemeral CI DB only
+        env:
+          CI_DATE_AUDIT_DSN: postgresql://bi_ci_tester:ci_ephemeral_password_only@127.0.0.1:5432/bi_ci_date_audit
+        run: python -m unittest db.test_date_ranges_pg_integration -v
