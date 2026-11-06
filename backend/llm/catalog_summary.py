@@ -150,6 +150,38 @@ def summarize_catalog(catalog: dict, relationships: dict | None = None,
         lines.append(relationships_section(relationships))
     return "\n".join(lines)
 
+def date_range_section(catalog: dict) -> str:
+    """Проверенные временные границы по полным колонкам, без предположений модели."""
+    lines = []
+    for table in catalog.get("tables") or []:
+        for column in table.get("columns") or []:
+            kind = column.get("inferred_type")
+            if kind not in ("date", "timestamp"):
+                continue
+            conversion = column.get("conversion") or {}
+            bounds = conversion.get("date_range")
+            name = column.get("name", "")
+            table_name = display_table_name(table.get("name", ""))
+            if not bounds or bounds.get("scope") != "full_column_valid_values":
+                lines.append(f"- «{table_name}», поле «{name}»: точный период пока не проверен.")
+                continue
+            first, last = bounds.get("min"), bounds.get("max")
+            if not first or not last:
+                lines.append(f"- «{table_name}», поле «{name}»: корректных дат нет.")
+                continue
+            quality = conversion.get("quality") or {}
+            missing = quality.get("missing_rows", 0)
+            invalid = quality.get("invalid_rows", 0)
+            note = []
+            if missing:
+                note.append(f"пропусков: {format_int(missing)}")
+            if invalid:
+                note.append(f"некорректных значений: {format_int(invalid)}")
+            suffix = f" ({'; '.join(note)})" if note else ""
+            lines.append(f"- «{table_name}», поле «{name}»: {first} — {last}{suffix}.")
+    return "Периоды данных (проверены по всем строкам):\n" + "\n".join(lines) if lines else ""
+
+
 
 def overview_table(catalog: dict) -> dict:
     """Таблица для фронтенда (поле `table` в docs/api-contract.md)."""
