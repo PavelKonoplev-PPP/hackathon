@@ -92,5 +92,58 @@ class LagAnalysisTests(unittest.TestCase):
         self.assertIsNone(rc.build("Есть ли корреляция между кликами и выручкой?", TABLE))
 
 
+class LagAgentIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        from backend.llm.ask import _SESSIONS
+        _SESSIONS.clear()
+
+    def test_agent_uses_lag_recipe_without_llm_guessing(self):
+        from backend.llm.ask import answer_question
+        from backend.llm.test_ask import FakeRunner, ScriptedClient
+
+        runner = FakeRunner(rows=[(3, 28, 1.0), (0, 31, 0.12)],
+                            columns=["Лаг, дней", "Пар наблюдений", "Корреляция r"])
+        model = ScriptedClient([])
+        trace = {}
+        response = answer_question(
+            "Проверь временной лаг между кликами и выручкой от -7 до +7 дней",
+            {"schema": "raw", "tables": [TABLE]}, runner,
+            client=model, trace=trace)
+        self.assertEqual(trace.get("recipe"), "lag")
+        self.assertEqual(trace.get("attempts"), 0)
+        self.assertEqual(model.calls, [])
+        self.assertIn("на 3 дн.", response["answer"])
+        self.assertIn("CORR(x, y)", response["sql"])
+        self.assertEqual(response["table"]["rows"][0][0], "3")
+
+    def test_agent_does_not_fabricate_lag_without_date(self):
+        from backend.llm.ask import answer_question
+        from backend.llm.test_ask import FakeRunner, ScriptedClient
+
+        no_date = {**TABLE, "columns": [
+            c for c in TABLE["columns"] if c["name"] != "Дата"]}
+        model = ScriptedClient([])
+        runner = FakeRunner()
+        response = answer_question(
+            "Проверь временной лаг между кликами и выручкой от -7 до +7 дней",
+            {"schema": "raw", "tables": [no_date]}, runner, client=model)
+        self.assertIn("проверенное поле даты", response["answer"])
+        self.assertNotIn("r =", response["answer"])
+        self.assertEqual(model.calls, [])
+        self.assertEqual(runner.sqls, [])
+
+    def test_failed_verified_lag_does_not_fall_back_to_llm(self):
+        from backend.llm.ask import answer_question
+        from backend.llm.test_ask import FakeRunner, ScriptedClient
+
+        model = ScriptedClient([])
+        runner = FakeRunner(fail_first=True)
+        response = answer_question(
+            "Проверь временной лаг между кликами и выручкой от -7 до +7 дней",
+            {"schema": "raw", "tables": [TABLE]}, runner, client=model)
+        self.assertIn("Не удалось выполнить проверенный расчёт", response["answer"])
+        self.assertEqual(model.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()
