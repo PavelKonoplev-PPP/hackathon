@@ -153,6 +153,50 @@ class ShortenTests(unittest.TestCase):
                          "Хранит данные о продажах. Можно считать выручку.")
 
 
+class LanguageAndCacheTests(unittest.TestCase):
+    def test_unexpected_chinese_fragment_uses_grounded_description(self):
+        from backend.llm.describe import describe_table
+
+        class Model:
+            calls = 0
+
+            def chat(self, messages, **kwargs):
+                self.calls += 1
+                return "Хранит сведения о событиях, включая время его的发生."
+
+        client = Model()
+        table = {"name": "События приложения", "columns": [
+            {"name": "Время события", "inferred_type": "timestamp"},
+            {"name": "Канал", "inferred_type": "category"},
+        ]}
+        result = describe_table(client, table)
+        self.assertNotIn("的发生", result)
+        self.assertIn("«Время события»", result)
+        self.assertEqual(client.calls, 1)
+
+    def test_schema_scoped_description_cache(self):
+        from types import SimpleNamespace
+        from backend.llm.describe import describe_table
+
+        class Model:
+            calls = 0
+            settings = SimpleNamespace(base_url="unit-cache-local", model="unit-description-v1")
+
+            def chat(self, messages, **kwargs):
+                self.calls += 1
+                return "Содержит данные о заказах. Можно анализировать количество."
+
+        client = Model()
+        table = {"name": "unit_cache_orders", "columns": [
+            {"name": "Код", "inferred_type": "identifier"}]}
+        first = describe_table(client, table)
+        self.assertEqual(describe_table(client, table), first)
+        self.assertEqual(client.calls, 1)
+        modified = {**table, "columns": [*table["columns"], {"name": "Сумма", "inferred_type": "decimal"}]}
+        describe_table(client, modified)
+        self.assertEqual(client.calls, 2)
+
+
 class PeriodSectionTests(unittest.TestCase):
     """#119: фактические даты по полям, без выдумок."""
 
