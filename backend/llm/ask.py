@@ -293,6 +293,18 @@ def unit_options(question: str, intent: Intent, table: dict) -> list[tuple[str, 
         for c in unique for w in words(c["name"]) for token in subject_words
     ):
         return []
+    # A unique row identifier plus a repeated secondary identifier alone does
+    # NOT prove the row is a line item. Background jobs, support tickets and
+    # other one-entity-per-row datasets routinely have both IDs. Ask about
+    # "rows vs unique entities" only with positive evidence of a *position*
+    # or line-item grain, such as sales "Код позиции" and repeated "Код заказа".
+    # Otherwise the user asked for a count of that table's entities.
+    positional_grain = any(
+        re.search(r"позици|строк|line[_\s-]?item|order[_\s-]?item|item[_\s-]?id", c["name"], re.IGNORECASE)
+        for c in unique
+    )
+    if not positional_grain:
+        return []
     groups = [c for c in ids if 0.5 * c["sample_rows"] <= (c.get("sample_distinct") or 0) < c["sample_rows"]]
     groups = sorted(groups, key=lambda c: -(c.get("sample_distinct") or 0))[:2]
     if not groups:
