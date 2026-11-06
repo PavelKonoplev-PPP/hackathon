@@ -427,6 +427,33 @@ class AnswerTests(unittest.TestCase):
         self.assertEqual(trace.get("table"), table["name"])
         self.assertNotEqual(trace.get("clarification"), "unit")
 
+    def test_job_count_is_clear_with_generic_row_and_run_identifiers(self):
+        """# Regression in full API eval: no position grain, despite two IDs."""
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        q = "Сколько фоновых заданий в каждом статусе?"
+        table = {"name": "data_08_Фоновые_задания", "columns": [
+            {"name": "Код записи", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 200},
+            {"name": "Код запуска", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 180},
+            {"name": "Статус", "inferred_type": "category"},
+        ]}
+        self.assertEqual(unit_options(q, Intent.parse(q), table), [])
+
+    def test_other_entity_with_two_ids_is_not_assumed_a_line_item(self):
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        q = "Сколько обращений в каждом статусе?"
+        table = {"name": "data_02_Обращения", "columns": [
+            {"name": "Номер обращения", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 300},
+            {"name": "Номер клиента", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 240},
+            {"name": "Статус", "inferred_type": "category"},
+        ]}
+        self.assertEqual(unit_options(q, Intent.parse(q), table), [])
+
     def test_unit_question_not_bypassed_by_unrelated_group_identifier(self):
         from backend.llm.ask import unit_options
         from backend.llm.semantics import Intent
