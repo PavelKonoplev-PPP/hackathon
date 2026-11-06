@@ -252,6 +252,41 @@ def strip_unmentioned_filters(sql: str, question: str, values: dict[str, list[st
     return (sql[:start].rstrip() + where + sql[end:].lstrip()).strip(), removed
 
 
+
+def _value_tokens_match(left: str, right: str) -> bool:
+    """Match case-inflected category names but never conflate numeric IDs."""
+    a = re.findall(r"[а-яёa-z0-9]+", left.lower().replace("ё", "е"))
+    b = re.findall(r"[а-яёa-z0-9]+", right.lower().replace("ё", "е"))
+    if len(a) != len(b):
+        return False
+    return all(x == y if min(len(x), len(y)) < 4 else same_word(x, y)
+               for x, y in zip(a, b))
+
+
+def normalize_category_values(sql: str, values: dict[str, list[str]]) -> str:
+    """Use the exact catalog label for a unique grammatical match.
+
+    Leave unknown and ambiguous literals unchanged so the normal validation
+    can reject them or request clarification.
+    """
+    def replace_filter(match: re.Match) -> str:
+        column, op, raw = match.groups()
+        known = values.get(column)
+        if not known or "like" in op.lower():
+            return match.group(0)
+        fixed = raw
+        for literal in _literals(raw):
+            if literal.lower() in {v.lower() for v in known}:
+                continue
+            candidates = [v for v in known if _value_tokens_match(literal, v)]
+            if len(candidates) == 1:
+                old = "'" + literal.replace("'", "''") + "'"
+                new = "'" + candidates[0].replace("'", "''") + "'"
+                fixed = fixed.replace(old, new)
+        return f'"{column}" {op} {fixed}'
+
+    return _FILTER.sub(replace_filter, sql)
+
 def _asked_words(question: str, ignore: set[str] | None) -> set[str]:
     asked = words(question)
     if ignore:
