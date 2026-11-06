@@ -161,7 +161,10 @@ class AnomalyTests(unittest.TestCase):
         self.assertIn('"Дата операции (МСК)" < \'2025-10-01\'', recipe.sql)
         # Period must apply BEFORE per-channel quartiles and aggregation.
         self.assertIn('FROM t WHERE', recipe.sql)
-        self.assertIn('AND ("Дата операции (МСК)"', recipe.sql)
+        # Entity-level operations are grouped after filtering; a row-level recipe
+        # instead appends AND to the non-null check.
+        self.assertIn('FROM t WHERE "Дата операции (МСК)"', recipe.sql)
+        self.assertLess(recipe.sql.index("2025-09-01"), recipe.sql.index("GROUP BY g, e"))
         self.assertNotIn('OR d.v >', recipe.sql)
         self.assertNotIn('d.v < s.q1', recipe.sql)
         self.assertIn('d.v > s.q3 + 1.5 * (s.q3 - s.q1)', recipe.sql)
