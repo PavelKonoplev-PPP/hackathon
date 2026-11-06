@@ -21,15 +21,16 @@ class DateAuditPostgresIntegrationTests(unittest.TestCase):
             raise RuntimeError("Refusing to create tables outside the isolated bi_ci_date_audit DB")
         cls.conn.execute("CREATE TABLE public.ci_date_audit_fixture "
                          "(day_text text, timestamp_text text, numeric_text text)")
-        cls.conn.executemany(
-            "INSERT INTO public.ci_date_audit_fixture VALUES (%s, %s, %s)",
-            [
-                ("2025-02-01", "2025-02-01 09:30:00", "10"),
-                ("2025-03-31", "2025-03-31 23:59:00", "12"),
-                ("", "", "bad"),
-                ("2025-02-30", "2025-02-30 07:00:00", "0"),
-            ],
-        )
+        with cls.conn.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO public.ci_date_audit_fixture VALUES (%s, %s, %s)",
+                [
+                    ("2025-02-01", "2025-02-01 09:30:00", "10"),
+                    ("2025-03-31", "2025-03-31 23:59:00", "12"),
+                    ("", "", "bad"),
+                    ("2025-02-30", "2025-02-30 07:00:00", "0"),
+                ],
+            )
 
     @classmethod
     def tearDownClass(cls):
