@@ -28,7 +28,9 @@ try:
         detect_ambiguous_query,
         detect_out_of_scope,
     )
-    from backend.llm.catalog_summary import display_table_name, match_table_name  # type: ignore
+    from backend.llm.catalog_summary import (  # type: ignore
+        catalog_inventory_response, display_table_name, match_table_name,
+    )
     HAS_LLM_MODULE = True
 except ImportError:
     try:
@@ -40,7 +42,9 @@ except ImportError:
             detect_ambiguous_query,
             detect_out_of_scope,
         )
-        from llm.catalog_summary import display_table_name, match_table_name  # type: ignore
+        from llm.catalog_summary import (  # type: ignore
+            catalog_inventory_response, display_table_name, match_table_name,
+        )
         HAS_LLM_MODULE = True
     except ImportError:
         HAS_LLM_MODULE = False
@@ -185,6 +189,26 @@ def is_describe_intent(question: str) -> bool:
     if any(t in q for t in triggers):
         return True
     return any(p.search(question.strip()) for p in DESCRIBE_PATTERNS)
+
+
+def is_catalog_inventory_intent(question: str) -> bool:
+    """Source-wide table counts, not a question about one selected table.
+
+    In particular, "Сколько таблиц и строк всего в текущем источнике?"
+    must not be routed to per-table SQL disambiguation.
+    """
+    q = question.lower().replace("ё", "е").strip()
+    tables = r"таблиц(?:ы|ам|ах|ами)?"
+    if re.search(rf"\bсколько\s+(?:всего\s+)?{tables}\b", q):
+        return True
+    if re.search(rf"\b(?:число|количество)\s+(?:всех\s+)?{tables}\b", q):
+        return True
+    if re.search(rf"\b{tables}\b", q) and re.search(r"\b(?:строк|записей)\b", q):
+        return bool(re.search(
+            r"\b(?:перечисли|всех|все|всего|каждой|каждую|каждом|источнике|базе)\b",
+            q,
+        ))
+    return False
 
 
 def _open_runner(datasource_id: str | None):
@@ -483,6 +507,20 @@ def process_chat_message(
                     "sql": None,
                     "clarification": None,
                 }
+
+        # Source-wide metadata inventory precedes per-table disambiguation.
+        # Use the *filtered* active catalog: external sources and table scopes
+        # must never leak data about the raw datasource.
+        if is_catalog_inventory_intent(message):
+            if recorder:
+                recorder.step("catalog_inventory", "Подсчёт таблиц и строк по каталогу источника")
+            res = catalog_inventory_response(catalog)
+            if recorder:
+                recorder.finish("completed")
+                res["status"] = "completed"
+                res["steps"] = [s.model_dump() for s in recorder.steps]
+                res["execution_time_ms"] = recorder.total_duration_ms
+            return res
 
         # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете. Проверяем после
         # выбора источника: термин, подтверждённый в бизнес-словаре ЭТОГО источника
