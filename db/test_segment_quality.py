@@ -126,7 +126,7 @@ class SegmentQualityTests(unittest.TestCase):
         expression = compare()[0].as_string()
         self.assertIn('"Среднее 1"', expression)
         self.assertIn('"Среднее 2"', expression)
-        self.assertIn('"Изменение, %"', expression)
+        self.assertIn('"Изменение, %%"', expression)  # Escaped for Psycopg params
         self.assertIn('"Пропусков или ошибок 1"', expression)
         self.assertIn('"Пропусков или ошибок 2"', expression)
 
