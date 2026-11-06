@@ -18,6 +18,8 @@ import argparse
 import datetime as dt
 import json
 import re
+from collections import OrderedDict
+from threading import Lock
 import sys
 from pathlib import Path
 
@@ -27,7 +29,8 @@ from .catalog_summary import (display_table_name, format_int, match_table_name, 
 RULES = """Правила:
 - Пиши по-русски, просто, для руководителя без технического опыта. Без SQL.
 - Используй ТОЛЬКО то, что дано ниже. Не придумывай поля, цифры и периоды.
-- Не пересказывай список колонок — объясняй смысл."""
+- Не пересказывай список колонок — объясняй смысл.
+- Отвечай только по-русски; не вставляй иероглифы или случайные слова на других языках, если их нет в исходном каталоге."""
 
 TABLE_PROMPT = f"""Ты — аналитик данных. Тебе дали описание одной таблицы из незнакомой базы.
 Напиши 2 предложения: 1) что хранит эта таблица (о каком процессе бизнеса);
@@ -87,12 +90,52 @@ def shorten(text: str, name: str, max_sentences: int = 2) -> str:
     return text
 
 
+_UNEXPECTED_CJK = re.compile(r"[\\u3400-\\u9fff]")
+_DESCRIPTION_CACHE: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+_DESCRIPTION_CACHE_LOCK = Lock()
+_DESCRIPTION_CACHE_MAX = 128
+
+
+def _description_fallback(table: dict) -> str:
+    """Avoid displaying non-Russian hallucinations absent from the source schema."""
+    name = display_table_name(table.get("name", ""))
+    columns = [str(c["name"]) for c in table.get("columns") or []
+               if isinstance(c, dict) and c.get("name")][:3]
+    if columns:
+        fields = ", ".join(f"«{c}»" for c in columns)
+        return (f"Содержит записи таблицы «{name}». "
+                f"Среди доступных для анализа полей: {fields}.")
+    return f"Содержит данные таблицы «{name}». Для анализа нужны сведения о её полях."
+
+
 def describe_table(client, table: dict) -> str:
-    text = client.chat([
+    block = table_block(table)
+    settings = getattr(client, "settings", None)
+    model = getattr(settings, "model", None)
+    base_url = getattr(settings, "base_url", None)
+    # Cache only descriptions for explicitly identified model/provider; the
+    # full catalog table block is part of the key, so schema changes invalidate.
+    key = (base_url, model, block) if model and base_url else None
+    if key is not None:
+        with _DESCRIPTION_CACHE_LOCK:
+            if key in _DESCRIPTION_CACHE:
+                _DESCRIPTION_CACHE.move_to_end(key)
+                return _DESCRIPTION_CACHE[key]
+    raw = client.chat([
         {"role": "system", "content": TABLE_PROMPT},
-        {"role": "user", "content": table_block(table)},
+        {"role": "user", "content": block},
     ], max_tokens=200)
-    return shorten(text, display_table_name(table["name"]))
+    if _UNEXPECTED_CJK.search(raw) and not _UNEXPECTED_CJK.search(block):
+        text = _description_fallback(table)
+    else:
+        text = shorten(raw, display_table_name(table["name"]))
+    if key is not None:
+        with _DESCRIPTION_CACHE_LOCK:
+            _DESCRIPTION_CACHE[key] = text
+            _DESCRIPTION_CACHE.move_to_end(key)
+            if len(_DESCRIPTION_CACHE) > _DESCRIPTION_CACHE_MAX:
+                _DESCRIPTION_CACHE.popitem(last=False)
+    return text
 
 
 def _fmt_date(value) -> str:
