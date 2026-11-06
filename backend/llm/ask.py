@@ -1022,14 +1022,31 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     # 5a. Готовый расчёт по шаблону (#112–#114): перцентиль, состояние на дату, цепочки.
     # SQL строит код из колонок таблицы — модель тут не нужна и не может ошибиться.
     recipe = None if periods and len(periods) > 1 else rc.build(full_question, table, values)
+    from .lag_analysis import is_lag_request
+    if is_lag_request(full_question) and recipe is None:
+        return _refuse(
+            "Для вычисления временных лагов нужны два однозначно названных числовых "
+            "показателя и проверенное поле даты в одной таблице. Укажите, например: "
+            "«Проверь лаг между кликами и выручкой по дням от -7 до +7 дней». "
+            "Связи между разными таблицами без подтверждённого ключа не предполагаю.",
+            refused=False,
+        )
     if recipe:
         say(f"Готовый расчёт: {recipe.description}")
         try:
             sql = validate_sql(recipe.sql, column_names)
             result = runner.run(table, sql)
         except Exception as exc:  # не вышло — дальше обычным путём, через модель
-            say(f"Шаблон не сработал ({str(exc).splitlines()[0]}) — пишу SQL обычным путём")
             trace["errors"].append(f"recipe: {exc}")
+            if recipe.kind == "lag":
+                # Never let the LLM invent a numerical lag when the verified
+                # temporal join cannot be executed or validated.
+                return _refuse(
+                    "Не удалось выполнить проверенный расчёт временных лагов. "
+                    "Числа и направление сдвига без расчёта не показываю.",
+                    refused=False,
+                )
+            say(f"Шаблон не сработал ({str(exc).splitlines()[0]}) — пишу SQL обычным путём")
         else:
             trace.update(sql=sql, columns=result.columns, rows=result.rows, recipe=recipe.kind,
                          attempts=0)
