@@ -36,7 +36,9 @@ def words(text: str) -> set[str]:
 
 
 def same_word(a: str, b: str) -> bool:
-    """«теме» ~ «тема», «каналам» ~ «канал», «розницу» ~ «розничный»: общее начало слова."""
+    """«теме» ~ «тема», but numeric years/IDs must match exactly."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -46,7 +48,9 @@ def same_word(a: str, b: str) -> bool:
 
 
 def strong_word(a: str, b: str) -> bool:
-    """Почти та же словоформа: «операций» ~ «операции», но не «оператора»."""
+    """Почти та же словоформа; числовые токены сравниваем строго."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -351,22 +355,67 @@ def _check_group_in_select(sql: str) -> list[str]:
     return []
 
 
-def _check_extra_conditions(sql: str, question: str, ignore: set[str] | None,
+def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
+                   aliases: dict[str, list[str]] | None) -> list[str]:
+    """«Средняя оценка» означает AVG числовой оценки, а не COUNT-процент."""
+    if (not numeric_columns
+            or not re.search(r"\bсредн\w*", question, re.IGNORECASE)
+            or not re.search(r"\bоценк\w*", question, re.IGNORECASE)
+            or re.search(r"процент|дол[яиюей]|%|csat|nps", question, re.IGNORECASE)):
+        return []
+    asked = words(question)
+    matching = [c for c in numeric_columns
+                if re.search(r"оценк", c, re.IGNORECASE)
+                and overlap(asked, words(c) | _alias_words(c, aliases))]
+    if not matching:
+        return []
+    if any(re.search(
+            r'\bavg\s*\(\s*(?:distinct\s+)?(?:t\s*\.\s*)?"' + re.escape(c) + r'"\s*\)',
+            sql, re.IGNORECASE) for c in matching):
+        return []
+    options = " или ".join(f'AVG("{c}")' for c in matching)
+    return [f"Вопрос просит среднюю числовую оценку: используй {options}, а не процент от COUNT."]
+
+
+def _check_extra_conditions(sql: str, question: str,
+                            values: dict[str, list[str]],
+                            ignore: set[str] | None,
+                            aliases: dict[str, list[str]] | None,
                             strict: bool = True) -> list[str]:
-    """Условия, которых нет в вопросе (E2E): «"Код покупателя" IS NULL» к вопросу «без карты»
-    и подзапросы «NOT IN (SELECT …)» вместо простого фильтра по значению.
-    Подзапрос отклоняем на всех попытках: лучше честное «не получилось», чем неверное число."""
+    """Reject only the proven category inversion and unrequested NULL conditions.
+
+    Safe read-only analytical subqueries and explicit IS NOT NULL remain allowed.
+    SQL safety / write protection is handled by sql_guard separately.
+    """
     problems = []
-    if re.search(r"\b(in|exists|any|all)\s*\(\s*select\b|[=<>]\s*\(\s*select\b", sql, re.IGNORECASE):
-        problems.append("Не используй подзапросы: фильтруй прямо по значению категории — "
-                        "WHERE \"колонка\" = 'значение'.")
-    if not strict:
+    nested = re.findall(r"\bnot\s+in\s*\(\s*select\b[^)]*\)",
+                        sql, re.IGNORECASE | re.DOTALL)
+    for col, known in (values or {}).items():
+        for value in known:
+            if not mentions(question, value, ignore):
+                continue
+            literal = "'" + value.replace("'", "''") + "'"
+            condition = r'"' + re.escape(col) + r'"\s*=\s*' + re.escape(literal)
+            if any(re.search(condition, item, re.IGNORECASE) for item in nested):
+                problems.append(
+                    f'Для условия «{value}» используй WHERE "{col}" = {literal} '
+                    "в основном запросе, без NOT IN, инвертирующего отбор.")
+    if not strict or re.search(
+            r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
+            question, re.IGNORECASE):
+        return problems
+    named = [(c, v) for c, known in (values or {}).items() for v in known
+             if mentions(question, v, ignore)]
+    if not any(
+            re.search(r'"' + re.escape(col) + r'"\s*=\s*' +
+                      re.escape("'" + value.replace("'", "''") + "'"),
+                      sql, re.IGNORECASE)
+            for col, value in named):
         return problems
     asked = _asked_words(question, ignore)
-    for column in re.findall(r'"([^"]+)"\s+is\s+(?:not\s+)?null', sql, re.IGNORECASE):
-        if not overlap(asked, _short_words(column)):
-            problems.append(f"Условие \"{column}\" IS NULL / IS NOT NULL не следует из вопроса — "
-                            "убери его.")
+    for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
+        if not overlap(asked, _short_words(column) | _alias_words(column, aliases)):
+            problems.append(f'Фильтр по пустому значению "{column}" не упоминается в вопросе — убери его.')
     return problems
 
 
@@ -433,6 +482,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if re.search(r"\b100(\.0*)?\s*\*\s*avg\s*\(", low) and \
             not re.search(r"процент|%|доля|долю|доли", question, re.IGNORECASE):
         problems.append("Не умножай среднее на 100: проценты в вопросе не просили.")
+    problems += _check_average(sql, question, numeric_columns, aliases)
     if intent.wants_distinct and "distinct" not in low:
         problems.append("В вопросе «разных/уникальных»: считай COUNT(DISTINCT \"колонка\").")
     if intent.time_grain and not re.search(r"date_trunc|extract|date_part", low):
@@ -446,7 +496,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
 
     problems += _check_group_in_select(sql)
     problems += _check_share(sql, question, intent, values, ignore)
-    problems += _check_extra_conditions(sql, question, ignore, strict)
+    problems += _check_extra_conditions(sql, question, values, ignore, aliases, strict)
     if columns:
         problems += _check_group_by(sql, question, columns, ignore, values, aliases)
         problems += check_money(sql, question, columns)
