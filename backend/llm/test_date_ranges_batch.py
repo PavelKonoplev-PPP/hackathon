@@ -1,5 +1,6 @@
 """Regression for one-query-per-table date ranges in description."""
 import unittest
+from datetime import date
 from unittest.mock import Mock
 
 from backend.llm.describe import period_section
@@ -52,8 +53,8 @@ class DateBatchTests(unittest.TestCase):
                 self.calls += 1
                 self.columns = columns
                 return {
-                    "Создано": ("2025-01-01", "2025-02-01"),
-                    "Срок": ("2025-01-05", "2025-04-01"),
+                    "Создано": (date(2025, 1, 1), date(2025, 2, 1)),
+                    "Срок": (date(2025, 1, 5), date(2025, 4, 1)),
                 }
 
             def date_range(self, table, column):
