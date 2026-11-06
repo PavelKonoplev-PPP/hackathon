@@ -112,10 +112,10 @@ def comparison_sql(
                ROUND(100 * (
                    (t.second_total / b.second_days)
                    / NULLIF(t.first_total / b.first_days, 0) - 1
-               ), 2) AS "Рост, %"
+               ), 2) AS "Рост, %%"
         FROM totals t CROSS JOIN population p CROSS JOIN bounds b
         WHERE p.objects > 0
-        ORDER BY "Рост, %" DESC NULLS LAST, "Группа"
+        ORDER BY "Рост, %%" DESC NULLS LAST, "Группа"
         {limit_clause}
     """).format(
         group_expr=group_expr,
