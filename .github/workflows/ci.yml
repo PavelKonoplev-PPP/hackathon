@@ -20,6 +20,20 @@ jobs:
 
   postgresql-loader-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: smoke
+          POSTGRES_DB: bi_smoke
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bi_smoke"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -31,6 +45,10 @@ jobs:
         run: |
           python -m compileall -q db
           python -m unittest discover -s db -p 'test_*.py'
+      - name: Execute normalized metric SQL against temporary PostgreSQL 16
+        env:
+          PG_SQL_SMOKE_DSN: postgresql://postgres:smoke@localhost:5432/bi_smoke
+        run: python -m unittest discover -s db -p 'test_pg_normalized_metrics.py' -v
 
   llm-unit-tests:
     runs-on: ubuntu-latest
