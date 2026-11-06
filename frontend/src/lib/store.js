@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { abortable, generateDashboard, sendMessage } from './api.js'
 import { detectMergeRequest, detectViewRequest, mergeCharts, mergeProblem, pieProblem, viewPhrase } from './chartViews.js'
 import { askedTextFor, createDashboardFromMessages, dashboardHasSubject, detectDashboardRequest, resultsFromMessages } from './dashboardsApi.js'
+import { buildBreakdownQuestion, forecastBreakdownReason } from './breakdown.js'
 import { dashboardHref } from './router.js'
 import { queriesApi } from './queriesApi.js'
 
@@ -346,9 +347,12 @@ export function useConversations({ onDashboardCreated } = {}) {
     const idx = conv.messages.findIndex((m) => m.id === msgId)
     const msg = conv.messages[idx]
     if (!msg) return
-    const asked = (askedTextFor(conv.messages, idx) || msg.chart?.title || '').replace(/[?.!\s]+$/, '')
-    const question = `${asked}. В разбивке по «${column}»`
-    await askAgent(conv, question, { id: uuid(), role: 'user', text: `${asked} — в разбивке по «${column}»` }, { sessionId: uuid(), tableName: msg.tableName })
+    if (forecastBreakdownReason(msg)) return
+    const question = buildBreakdownQuestion(conv.messages, idx, column, msg.chart?.title)
+    if (!question) return
+    await askAgent(conv, question,
+      { id: uuid(), role: 'user', text: question, originalQuestion: question.split(' — в разбивке по «')[0] },
+      { sessionId: uuid(), tableName: msg.tableName })
   }
 
   // Новый диалог по выбранной таблице (например, после загрузки CSV) с первым вопросом.
