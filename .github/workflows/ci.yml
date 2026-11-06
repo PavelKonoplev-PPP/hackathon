@@ -69,7 +69,7 @@ jobs:
       - name: Build React application
         run: npm run build
 
-postgresql-date-audit-smoke:
+  postgresql-date-audit-smoke:
     runs-on: ubuntu-latest
     services:
       postgres:
