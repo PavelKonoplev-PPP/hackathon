@@ -486,6 +486,26 @@ class GroupInSelectTests(unittest.TestCase):
                  'GROUP BY date_trunc(\'month\', "Дата")')
         self.assertEqual(check_sql(month, "Сколько по месяцам?", Intent.parse("Сколько по месяцам?"), {}), [])
 
+    def test_month_alias_in_group_by_matches_visible_select_label(self):
+        from backend.llm.semantics import Intent, check_sql
+        question = "Сколько записей о продажах было в каждом месяце?"
+        sql = ('SELECT date_trunc(\'month\', "Дата операции (МСК)") AS "Месяц", '
+               'COUNT(*) AS "Количество записей" FROM t GROUP BY "Месяц" ORDER BY "Месяц"')
+        self.assertEqual(check_sql(sql, question, Intent.parse(question), {},
+                                   columns=["Дата операции (МСК)"]), [])
+
+    def test_missing_or_misleading_group_alias_still_rejected(self):
+        from backend.llm.semantics import Intent, check_sql
+        question = "Сколько записей о продажах было в каждом месяце?"
+        missing = ('SELECT COUNT(*) AS "Количество" FROM t GROUP BY "Месяц"')
+        wrong_alias = ('SELECT date_trunc(\'month\', "Дата операции (МСК)") AS "Год", '
+                       'COUNT(*) FROM t GROUP BY "Месяц"')
+        misleading = ('SELECT COUNT(*) AS "Месяц" FROM t GROUP BY "Месяц"')
+        for sql in [missing, wrong_alias, misleading]:
+            with self.subTest(sql=sql):
+                issues = check_sql(sql, question, Intent.parse(question), {})
+                self.assertTrue(any("нет в SELECT" in issue for issue in issues), issues)
+
 
 class ExtraConditionTests(unittest.TestCase):
     """E2E 30.10: лишний IS NULL и подзапросы к вопросам «без карты»."""
