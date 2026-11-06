@@ -541,7 +541,12 @@ def anomaly_recipe(question: str, table: dict) -> Recipe | None:
 # ---------- выбор ----------
 
 def build(question: str, table: dict, values: dict[str, list[str]] | None = None) -> Recipe | None:
-    """Рецепт для вопроса или None. Порядок: цепочки, перцентиль, состояние на дату."""
+    """Verified deterministic calculations, including true aligned daily lags."""
+    from .lag_analysis import build_lag_plan, is_lag_request
+
+    if is_lag_request(question):
+        lag = build_lag_plan(question, table)
+        return Recipe("lag", lag.sql, lag.description, lag.answer) if lag else None
     for make in (lambda: chains_recipe(question, table, values or {}),
                  lambda: percentile_recipe(question, table),
                  lambda: asof_recipe(question, table),
