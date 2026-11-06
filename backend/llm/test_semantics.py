@@ -472,6 +472,41 @@ class ShareTests(unittest.TestCase):
         self.assertEqual(self.check(q, sql), "")
 
 
+
+class CategoryNormalizationTests(unittest.TestCase):
+    """Preserve unambiguous category-case normalization from draft PR #132."""
+
+    def test_unique_case_ending_uses_exact_catalog_value(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = ('SELECT COUNT(*) FILTER (WHERE "Канал обращения" = '
+               "'Чат в приложение') FROM t")
+        values = {"Канал обращения": ["Телефон", "Чат в приложении"]}
+        self.assertEqual(normalize_category_values(sql, values),
+                         sql.replace("'Чат в приложение'", "'Чат в приложении'"))
+
+    def test_unknown_or_ambiguous_value_is_not_rewritten(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Канал обращения" = 'Чат в приложение'"""
+        self.assertEqual(normalize_category_values(sql, {"Канал обращения": ["Телефон"]}), sql)
+        ambiguous = """SELECT COUNT(*) FROM t WHERE "Канал" = 'Сервису доставки'"""
+        values = {"Канал": ["Сервис доставки", "Сервиса доставки"]}
+        self.assertEqual(normalize_category_values(ambiguous, values), ambiguous)
+
+    def test_numeric_ids_not_stemmed_and_like_unchanged(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Период" = '2025'"""
+        values = {"Период": ["2026"]}
+        self.assertEqual(normalize_category_values(sql, values), sql)
+        like = """SELECT COUNT(*) FROM t WHERE "Канал" ILIKE 'Чат в приложение'"""
+        self.assertEqual(normalize_category_values(
+            like, {"Канал": ["Чат в приложении"]}), like)
+
+    def test_does_not_rewrite_literals_of_other_columns(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Статус" = 'Чат в приложение'"""
+        values = {"Канал": ["Чат в приложении"], "Статус": ["Готово"]}
+        self.assertEqual(normalize_category_values(sql, values), sql)
+
 class GroupInSelectTests(unittest.TestCase):
     """E2E 05.11: GROUP BY без колонки разбивки в SELECT."""
 
