@@ -68,11 +68,30 @@ def _terms(value: str) -> list[str]:
 
 
 def _metrics(question: str, table: dict) -> tuple[str, str] | None:
-    """Find exactly two numeric metrics named in the question, in mention order.
+    """Find exactly two explicitly named numeric metrics in mention order.
 
-    Do not guess a different column if a metric is missing or ambiguous.
+    In a natural question like "lag between clicks and revenue. Show the
+    coefficient and number of paired days", *show* and *number* are output
+    instructions, not a third metric. Prefer the "между X и Y" clause and
+    inspect the rest only if that clause is absent. Never guess a metric.
     """
-    asked = _terms(question)
+    from .semantics import STOP_WORDS
+
+    between = re.search(r"\bмежду\b", question, re.IGNORECASE)
+    if between:
+        relation = re.split(r"[.!?;\n]", question[between.end():], maxsplit=1)[0]
+        # Keep only the metric clause; trailing asks about statistics, lags,
+        # sample size and display format are not additional series.
+        relation = re.split(
+            r"\b(?:от\s*[+\-−]?\d+\s*до|на\s*\d+\s*дн|"
+            r"покажи|покажите|выведи|коэффициент|число\s+пар|"
+            r"количество\s+сопоставленных)\b",
+            relation, maxsplit=1, flags=re.IGNORECASE
+        )[0]
+        search_text = relation
+    else:
+        search_text = question
+    asked = [w for w in _terms(search_text) if w not in STOP_WORDS]
     found = []
     for col in table.get("columns") or []:
         if column_kind(col) not in ("integer", "decimal"):
