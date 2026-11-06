@@ -32,6 +32,7 @@ from . import expert_metrics as em
 from . import expert_recipes as er
 from . import compare as cmp
 from . import glossary as gl
+from . import hypothesis as hp
 from . import kpis as kp
 from . import recipes as rc
 from . import whatif as wi
@@ -898,6 +899,14 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
 
     full_question = f"{previous['question']} {question}" if previous else question
     intent = Intent.parse(full_question)
+
+    # Открытые вопросы («можно ли утверждать…», «при каких условиях…»): считает код, модель не нужна
+    if not previous:
+        columns_total = len(table.get("columns") or [])
+        reply = hp.answer(question, table, runner, mentioned_columns(question, table, limit=columns_total), say)
+        if reply:
+            state["last"] = {"question": question, "table": table["name"], "sql": reply.get("sql") or ""}
+            return reply
 
     # Метрика должна быть в таблице до SQL (#98): «выручка» по таблице без денег — не считаем
     if MONEY.search(full_question) and not has_money(table):
