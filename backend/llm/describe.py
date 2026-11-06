@@ -140,6 +140,16 @@ def period_section(catalog: dict, runner=None) -> str:
                         + ", ".join(f"«{u}»" for u in unsure) + " — период не рассчитан")
             lines.append(f"- «{name}»: {note}.")
             continue
+        # Group date aggregates into one read-only SQL scan per table when the
+        # runner supports batching. Older runners still use date_range().
+        ranges = {}
+        if runner is not None and hasattr(runner, "date_ranges"):
+            try:
+                verified = [c["name"] for c in dates
+                            if column_kind(c) in ("date", "timestamp")]
+                ranges = runner.date_ranges(table, verified)
+            except Exception:
+                ranges = {}
         parts = []
         for col in dates:
             quality = (col.get("conversion") or {}).get("quality") or {}
@@ -147,7 +157,9 @@ def period_section(catalog: dict, runner=None) -> str:
             missing = quality.get("missing_rows") or 0
             invalid = quality.get("invalid_rows") or 0
             low = high = None
-            if runner is not None:
+            if col["name"] in ranges:
+                low, high = ranges[col["name"]]
+            elif runner is not None:
                 try:
                     low, high = runner.date_range(table, col["name"])
                 except Exception:
