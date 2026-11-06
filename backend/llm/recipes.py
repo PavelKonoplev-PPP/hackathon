@@ -387,13 +387,24 @@ def chains_recipe(question: str, table: dict, values: dict[str, list[str]]) -> R
 # ---------- аномалии (#121) ----------
 
 ANOMALY = re.compile(r"аномал|выброс|необычн\w*\s+(значен|сумм|заказ)|подозрительн", re.IGNORECASE)
-MIN_SAMPLE = 20  # меньше наблюдений в группе — выводу не доверяем
+MIN_SAMPLE = 20  # fewer observations in a group: suppress outlier counts, don't invent certainty
+_LARGE_OUTLIER = re.compile(
+    r"крупн|больш\w*|высок\w*|верхн\w*|завышен|дорог\w*|превыша\w*",
+    re.IGNORECASE,
+)
+_SMALL_OUTLIER = re.compile(
+    r"маленьк\w*|мелк\w*|низк\w*|нижн\w*|небольш\w*|дешев\w*|"
+    r"меньш\w*|минимальн\w*",
+    re.IGNORECASE,
+)
 
 
 def anomaly_recipe(question: str, table: dict) -> Recipe | None:
-    """Выбросы по правилу Тьюки: вне [Q1 − 1,5·IQR; Q3 + 1,5·IQR] внутри каждой группы.
-    Если в вопросе названа сущность («сумма заказов») и в таблице есть её код — сначала
-    сумма по сущности (заказу), потом выбросы среди заказов."""
+    """Tukey IQR outliers computed per segment, with exact user period and tail.
+
+    Aggregate by a named entity first when requested (e.g. one row per order),
+    otherwise evaluate individual rows. Never silently drop an explicit period.
+    """
     if not ANOMALY.search(question):
         return None
     from .semantics import MONEY, money_formula
@@ -419,56 +430,110 @@ def anomaly_recipe(question: str, table: dict) -> Recipe | None:
                 value, what = _q(money[0]), f"«{money[0]}»"
     if value is None:
         return None
+
+    periods = cmp.parse_periods(question)
+    # Multiple explicit periods require a comparison, not one unspecified pool.
+    if len(periods) > 1:
+        return None
+    period = periods[0] if periods else None
+    period_col = None
+    if period:
+        kinds = {c["name"]: column_kind(c) for c in table.get("columns") or []}
+        period_col = cmp.choose_date_column(table, question, kinds)
+        if not period_col:
+            return None
+    period_cond = period.condition(period_col) if period else None
+
+    upper = bool(_LARGE_OUTLIER.search(question))
+    lower = bool(_SMALL_OUTLIER.search(question))
+    if upper and not lower:
+        direction = "upper"
+    elif lower and not upper:
+        direction = "lower"
+    else:
+        direction = "both"  # unspecified or explicitly asks for both tails
+
     ids = [c["name"] for c in table.get("columns") or [] if c.get("inferred_type") == "identifier"]
     entity = next((c for c in ids for t in _tokens(question)
                    if len(t) >= 4 and any(same_word(t, w) for w in _tokens(c) if len(w) >= 4)), None)
     group = group_column(question, table)
     g = f"{_q(group)} AS g, " if group else ""
     if entity:
-        base = (f"SELECT {g}{_q(entity)} AS e, SUM({value}) AS v FROM t "
-                f"GROUP BY {'g, ' if group else ''}e")
+        base = f"SELECT {g}{_q(entity)} AS e, SUM({value}) AS v FROM t"
+        if period_cond:
+            base += f" WHERE {period_cond}"
+        base += f" GROUP BY {'g, ' if group else ''}e"
         unit_desc = f"{what} по каждому «{entity}»"
     else:
         base = f"SELECT {g}{value} AS v FROM t WHERE {value} IS NOT NULL"
+        if period_cond:
+            base += f" AND ({period_cond})"
         unit_desc = what
+
     by = "g" if group else None
     stats = ("SELECT " + ("g, " if by else "")
              + "percentile_cont(0.25) WITHIN GROUP (ORDER BY v) AS q1, "
              "percentile_cont(0.75) WITHIN GROUP (ORDER BY v) AS q3 FROM d WHERE v IS NOT NULL"
              + (" GROUP BY g" if by else ""))
     join = " JOIN s USING (g)" if by else " CROSS JOIN s"
-    out_cond = "(d.v < s.q1 - 1.5 * (s.q3 - s.q1) OR d.v > s.q3 + 1.5 * (s.q3 - s.q1))"
+    lower_cond = "d.v < s.q1 - 1.5 * (s.q3 - s.q1)"
+    upper_cond = "d.v > s.q3 + 1.5 * (s.q3 - s.q1)"
+    out_cond = (upper_cond if direction == "upper" else lower_cond if direction == "lower"
+                else f"({lower_cond} OR {upper_cond})")
+    bound_expr = ("s.q1 - 1.5 * (s.q3 - s.q1)" if direction == "lower"
+                  else "s.q3 + 1.5 * (s.q3 - s.q1)")
+    bound_label = "Нижняя граница" if direction == "lower" else "Верхняя граница"
+    extremum = "MIN" if direction == "lower" else "MAX"
+    extremum_label = "Минимум" if direction == "lower" else "Максимум"
+    # A tiny group can produce arbitrary IQR estimates. Show n, but no
+    # authoritative outlier count for it (NULL instead of a misleading value).
+    count_sql = (f"CASE WHEN COUNT(*) >= {MIN_SAMPLE} THEN "
+                 f"COUNT(*) FILTER (WHERE {out_cond}) ELSE NULL END")
     sql = (f"WITH d AS ({base}), s AS ({stats}) SELECT "
            + (f"d.g AS {_q(group)}, " if by else "")
            + f"COUNT(*) AS {_q('Наблюдений')}, "
            f"ROUND(MIN(s.q1)::numeric, 2) AS {_q('Q1')}, ROUND(MIN(s.q3)::numeric, 2) AS {_q('Q3')}, "
-           f"ROUND(MIN(s.q3 + 1.5 * (s.q3 - s.q1))::numeric, 2) AS {_q('Верхняя граница')}, "
-           f"COUNT(*) FILTER (WHERE {out_cond}) AS {_q('Выбросов')}, "
-           f"ROUND(MAX(d.v)::numeric, 2) AS {_q('Максимум')} "
-           f"FROM d{join} WHERE d.v IS NOT NULL" + (" GROUP BY d.g ORDER BY 6 DESC, 1" if by else ""))
-    desc = (f"значение — {unit_desc}; выброс — вне [Q1 − 1,5·IQR; Q3 + 1,5·IQR] "
+           f"ROUND(MIN({bound_expr})::numeric, 2) AS {_q(bound_label)}, "
+           f"{count_sql} AS {_q('Выбросов')}, "
+           f"ROUND({extremum}(d.v)::numeric, 2) AS {_q(extremum_label)} "
+           f"FROM d{join} WHERE d.v IS NOT NULL"
+           + (" GROUP BY d.g ORDER BY 6 DESC NULLS LAST, 1" if by else ""))
+    criterion = {
+        "upper": "выше Q3 + 1,5·IQR",
+        "lower": "ниже Q1 − 1,5·IQR",
+        "both": "вне [Q1 − 1,5·IQR; Q3 + 1,5·IQR]",
+    }[direction]
+    desc = (f"значение — {unit_desc}; выброс — {criterion} "
             + (f"внутри каждого «{group}»" if group else "по всем данным")
+            + (f"; фильтр по «{period_col}»: {period.label}" if period else "")
             + "; пустые значения не учитываются. Выброс — статистически необычное значение, "
-            f"а не ошибка данных; при меньше {MIN_SAMPLE} наблюдений вывод недостоверен")
+            f"а не ошибка данных; при меньше {MIN_SAMPLE} наблюдений число выбросов не рассчитывается")
 
     def answer(columns, rows):
         if not rows:
             return "Данных для поиска выбросов не нашлось."
-        k = 1 if group else 0
-        small = [r for r in rows if (r[k] or 0) < MIN_SAMPLE]
-        total = sum(r[k + 4] or 0 for r in rows)
+        idx = 1 if group else 0
+        small = [r for r in rows if (r[idx] or 0) < MIN_SAMPLE]
+        eligible = [r for r in rows if (r[idx] or 0) >= MIN_SAMPLE]
+        if not eligible:
+            return (f"Недостаточно наблюдений для надёжного поиска выбросов "
+                    f"(требуется минимум {MIN_SAMPLE} в группе). Критерий: {desc}.")
+        total = sum(r[idx + 4] or 0 for r in eligible)
+        denominator = sum(r[idx] or 0 for r in eligible)
         if group:
-            top = rows[0]
-            text = (f"Выбросов всего {_fmt(total)} из {_fmt(sum(r[1] or 0 for r in rows))} наблюдений. "
-                    f"Больше всего — «{top[0]}»: {_fmt(top[5])} (верхняя граница {_fmt(top[4])}, "
-                    f"максимум {_fmt(top[6])}).")
+            top = eligible[0]
+            text = (f"Выбросов всего {_fmt(total)} из {_fmt(denominator)} проверенных наблюдений. "
+                    f"Больше всего — «{top[0]}»: {_fmt(top[5])} "
+                    f"({bound_label.lower()} {_fmt(top[4])}, "
+                    f"{extremum_label.lower()} {_fmt(top[6])}).")
         else:
-            r = rows[0]
-            text = (f"Выбросов {_fmt(r[4])} из {_fmt(r[0])} наблюдений; верхняя граница "
-                    f"{_fmt(r[3])}, максимум {_fmt(r[5])}.")
+            row = eligible[0]
+            text = (f"Выбросов {_fmt(row[4])} из {_fmt(row[0])} наблюдений; "
+                    f"{bound_label.lower()} {_fmt(row[3])}, "
+                    f"{extremum_label.lower()} {_fmt(row[5])}.")
         if small:
-            text += (" Мало данных (меньше " + str(MIN_SAMPLE) + " наблюдений) — вывод недостоверен: "
-                     + ", ".join(f"«{r[0]}»" if group else "все данные" for r in small) + ".")
+            text += (f" Исключены группы с менее {MIN_SAMPLE} наблюдений: "
+                     + ", ".join(f"«{r[0]}»" if group else "вся выборка" for r in small) + ".")
         return text + f" Критерий: {desc}."
     return Recipe("anomaly", sql, desc, answer)
 
