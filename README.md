@@ -124,17 +124,41 @@ npm run dev
 Откройте http://localhost:3000. Без backend интерфейс можно посмотреть в демо-режиме
 (`VITE_MOCK=1`, значение по умолчанию): ответы-заглушки, дашборды хранятся в браузере.
 
+### Повторный запуск без перезаписи данных (#123)
+
+На уже настроенном компьютере можно запустить оба сервиса одной командой, без отдельных вкладок. Сначала убедитесь, что Docker/PostgreSQL и Ollama запущены, а `.env`, `data/schema-catalog.json` и `frontend/node_modules` сохранены:
+
+```bash
+python3 scripts/start_local.py --check
+python3 scripts/start_local.py
+```
+
+Скрипт использует `.venv/bin/python` или текущий Python. При отдельном окружении укажите его явно, например из соседнего worktree:
+
+```bash
+BI_PYTHON=../hackathon/.venv/bin/python python3 scripts/start_local.py --check
+BI_PYTHON=../hackathon/.venv/bin/python python3 scripts/start_local.py
+```
+
+Он проверяет **реальную авторизацию PostgreSQL** под ролью только для чтения и наличие модели в локальной Ollama (если используется порт 11434), запускает FastAPI на `127.0.0.1:8000` и Vite на `127.0.0.1:3000` с `VITE_MOCK=0`. Остановка `Ctrl+C` останавливает только запущенные им процессы.
+
+**Безопасность:** скрипт не вызывает Docker, не скачивает/не загружает CSV, не перезаписывает `.env`, не сбрасывает базу и не убивает уже работающие серверы. Если порт занят или модель отсутствует, запуск останавливается с диагностикой. Для запуска уже действующих вручную серверов этот скрипт не нужен.
+
+
 ## Тесты
 
 ```bash
 python -m pytest -q backend                               # API и агент
 python -m unittest discover -s db -p 'test_*.py'          # загрузка, профилирование, каталог
 python db/run_golden_checks.py                            # контрольные расчёты на данных
-python -m backend.llm.eval                                # точность ответов агента через API
+python -m backend.llm.eval --api http://127.0.0.1:8000 --with-holdout   # 75 реальных API-вопросов
+python db/expert_regression.py --api http://127.0.0.1:8000           # 6 экспертных вопросов
+cd frontend && npm test && npm run build                            # тесты и сборка UI
 ```
 
-CI на каждом pull request: тесты загрузчика, unit-тесты агента, сборка интерфейса,
-запрет на CSV и большие файлы в репозитории.
+CI на каждом pull request: тесты загрузчика, unit-тесты LLM и Backend, безопасного
+запуска, тесты и сборка интерфейса, запрет CSV и больших файлов. Полные E2E-тесты
+с локальной PostgreSQL и Ollama запускаются отдельно, а не имитируются в GitHub Actions.
 
 ## Структура
 
