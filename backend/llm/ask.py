@@ -1028,6 +1028,39 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
         values = runner.category_values(table)
     column_names = [c["name"] for c in table.get("columns") or []]
 
+    # Verified two-period comparison with *both* AVG and delivery counts and
+    # two grouping dimensions. The general compare flow handles only one
+    # metric across two periods; allowing an LLM to improvise this shape can
+    # turn averages into SUM and introduce a spurious date GROUP BY.
+    from . import segment_compare as sc
+    segment_plan = sc.build(full_question, table, periods, date_col)
+    if segment_plan:
+        say(f"Проверенный многомерный расчёт: {segment_plan.description}")
+        try:
+            sql = validate_sql(segment_plan.sql, column_names)
+            result = runner.run(table, sql)
+        except Exception as exc:
+            trace["errors"].append(f"segment_compare: {exc}")
+            return _refuse(
+                "Не удалось надёжно рассчитать средние, количества и изменение "
+                "по двум периодам и сегментам. Непроверенные цифры не показываю.",
+                refused=False,
+            )
+        trace.update(sql=sql, columns=result.columns, rows=result.rows,
+                     recipe="segment_compare", attempts=0,
+                     periods=[p.label for p in segment_plan.periods])
+        state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
+        response = _result_response(result, sql, table, None, full_question)
+        response.pop("_note", None)
+        response["answer"] = segment_plan.answer(result.columns, result.rows)
+        # Do not plot counts, rubles and percentages on one axis.
+        chart = segment_plan.chart(result.rows)
+        if chart is not None:
+            response["chart"] = chart
+        else:
+            response.pop("chart", None)
+        return response
+
     # 5a. Готовый расчёт по шаблону (#112–#114): перцентиль, состояние на дату, цепочки.
     # SQL строит код из колонок таблицы — модель тут не нужна и не может ошибиться.
     recipe = None if periods and len(periods) > 1 else rc.build(full_question, table, values)
