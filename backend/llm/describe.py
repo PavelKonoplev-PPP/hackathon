@@ -174,8 +174,13 @@ def period_section(catalog: dict, runner=None) -> str:
     maxs = [m for m in maxs if m]
     header = ["Период данных (по полям дат, только корректные значения):"]
     if len(catalog.get("tables") or []) > 1 and mins and maxs:
-        header.append(f"- Общий интервал источника: с {_fmt_date(min(mins))} по {_fmt_date(max(maxs))} "
-                      "(по основным датам таблиц; у отдельных таблиц он может быть уже).")
+        header.append(
+            f"- Общий диапазон значений полей даты: с {_fmt_date(min(mins))} "
+            f"по {_fmt_date(max(maxs))}. "
+            "Включает разные виды дат, в том числе плановые сроки и будущие дедлайны; "
+            "это не период фактически совершённых операций. "
+            "Период каждой таблицы и события смотрите ниже."
+        )
     return "\n".join(header + lines)
 
 
