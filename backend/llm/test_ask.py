@@ -436,7 +436,7 @@ class AnswerTests(unittest.TestCase):
             {"name": "Код заказа", "inferred_type": "identifier",
              "sample_rows": 300, "sample_distinct": 280},
         ]}
-        self.assertTrue(unit_options("Сколько продаж по заказам?", Intent.parse("Сколько продаж по заказам?"), table))
+        self.assertTrue(unit_options("Сколько продаж по каналам?", Intent.parse("Сколько продаж по каналам?"), table))
 
     def test_unit_clarification(self):
         result, _, trace = ask("Сколько продаж через интернет-магазин?", [], session="s2")
