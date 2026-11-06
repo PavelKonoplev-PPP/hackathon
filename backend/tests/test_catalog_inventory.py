@@ -31,7 +31,7 @@ def fixture():
                 "columns": [{"name": "Дата", "inferred_type": "date"}],
             },
             {
-                "name": "data_empty",
+                "name": "data_03_empty",
                 "row_count": 0,
                 "columns": [],
             },
