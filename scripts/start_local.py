@@ -32,7 +32,9 @@ from scripts.check_env import load_simple_env  # noqa: E402
 def python_bin() -> str:
     configured = os.environ.get("BI_PYTHON")
     if configured:
-        return str(Path(configured).expanduser().resolve())
+        # Preserve the venv/bin/python symlink: resolve() points to the system
+        # interpreter and can discard the selected virtual environment.
+        return os.path.abspath(os.path.expanduser(configured))
     local = ROOT / ".venv" / "bin" / "python"
     return str(local) if local.is_file() else sys.executable
 
