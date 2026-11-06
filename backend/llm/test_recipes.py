@@ -130,14 +130,95 @@ class AnomalyTests(unittest.TestCase):
         self.assertIn('d.g AS "Канал"', r.sql)
         text = r.answer(["Канал", "Наблюдений", "Q1", "Q3", "Верхняя", "Выбросов", "Максимум"],
                         [("Онлайн", 500, 10, 30, 60, 12, 900), ("Касса", 8, 5, 9, 15, 1, 40)])
-        self.assertIn("Выбросов всего 13 из 508", text)
-        self.assertIn("«Касса»", text)  # мало данных — вывод недостоверен
+        self.assertIn("Выбросов всего 12 из 500", text)
+        self.assertIn("«Касса»", text)  # малую группу исключили из общего числа
         self.assertIn("Q1 − 1,5·IQR", text)
 
     def test_numeric_column_without_groups(self):
         r = rc.build("Есть ли выбросы в цене за единицу?", self.SALES)
         self.assertIn('SELECT "Цена за единицу, руб." AS v FROM t WHERE', r.sql)
         self.assertIn("CROSS JOIN s", r.sql)
+
+
+    DATED_SALES = {"name": "sales", "columns": [
+        col("Код операции", inferred="identifier"),
+        col("Дата операции (МСК)", "timestamp"),
+        col("Канал продажи"),
+        col("Количество, шт.", "integer"),
+        col("Цена до скидки за единицу, руб.", "decimal"),
+        col("Скидка, %", "decimal"),
+    ]}
+
+    def test_large_outlier_is_upper_tail_and_respects_explicit_month(self):
+        question = ("Найди аномально крупные суммы продаж по каналам продаж "
+                    "за сентябрь 2025 года. Покажи критерий определения аномалии, "
+                    "рассчитанный порог, количество аномальных операций и общее число операций "
+                    "в каждом канале.")
+        recipe = rc.anomaly_recipe(question, self.DATED_SALES)
+        self.assertIsNotNone(recipe)
+        self.assertIn('d.g AS "Канал продажи"', recipe.sql)
+        self.assertIn('"Дата операции (МСК)" >= \'2025-09-01\'', recipe.sql)
+        self.assertIn('"Дата операции (МСК)" < \'2025-10-01\'', recipe.sql)
+        # Period must apply BEFORE per-channel quartiles and aggregation.
+        self.assertIn('FROM t WHERE', recipe.sql)
+        self.assertIn('AND ("Дата операции (МСК)"', recipe.sql)
+        self.assertNotIn('OR d.v >', recipe.sql)
+        self.assertNotIn('d.v < s.q1', recipe.sql)
+        self.assertIn('d.v > s.q3 + 1.5 * (s.q3 - s.q1)', recipe.sql)
+        self.assertIn('WHEN COUNT(*) >= 20', recipe.sql)
+        self.assertIn('ELSE NULL END AS "Выбросов"', recipe.sql)
+        self.assertIn('сентябрь 2025', recipe.description)
+        self.assertIn('выше Q3 + 1,5·IQR', recipe.description)
+
+    def test_lower_outliers_do_not_count_upper_tail(self):
+        recipe = rc.anomaly_recipe("Покажи аномально низкие суммы по каналам за март 2025", self.DATED_SALES)
+        self.assertIsNotNone(recipe)
+        self.assertIn('d.v < s.q1 - 1.5 * (s.q3 - s.q1)', recipe.sql)
+        self.assertNotIn('d.v > s.q3', recipe.sql)
+        self.assertIn('"Нижняя граница"', recipe.sql)
+        self.assertIn('ниже Q1 − 1,5·IQR', recipe.description)
+        self.assertIn("'2025-03-01'", recipe.sql)
+        self.assertIn("'2025-04-01'", recipe.sql)
+
+    def test_unspecified_outlier_keeps_two_tails(self):
+        recipe = rc.anomaly_recipe("Найди выбросы по каналам", self.DATED_SALES)
+        # No metric in this question — recipe must not invent one.
+        self.assertIsNone(recipe)
+        recipe = rc.anomaly_recipe("Найди выбросы суммы по каналам", self.DATED_SALES)
+        self.assertIn('d.v < s.q1', recipe.sql)
+        self.assertIn('OR d.v > s.q3', recipe.sql)
+
+    def test_entity_level_date_filter_applied_before_grouping(self):
+        orders = {"name": "dated_orders", "columns": [
+            col("Номер чека", inferred="identifier"),
+            col("Создано", "date"),
+            col("Канал"),
+            col("Количество, шт.", "integer"),
+            col("Цена за единицу, руб.", "decimal"),
+        ]}
+        recipe = rc.anomaly_recipe("Найди аномально крупные суммы чеков по каналам в марте 2025", orders)
+        self.assertIsNotNone(recipe)
+        self.assertIn('FROM t WHERE "Создано" >= \'2025-03-01\' '
+                      'AND "Создано" < \'2025-04-01\' GROUP BY g, e', recipe.sql)
+
+    def test_period_without_verified_date_column_is_never_dropped(self):
+        self.assertIsNone(rc.anomaly_recipe(
+            "Найди аномально крупные суммы чеков по каналам за сентябрь 2025",
+            self.SALES
+        ))
+
+    def test_small_groups_do_not_generate_numeric_anomaly_counts(self):
+        recipe = rc.anomaly_recipe("Найди аномально крупные суммы продаж по каналам", self.DATED_SALES)
+        answer = recipe.answer(["Канал", "Наблюдений", "Q1", "Q3", "Верхняя граница", "Выбросов", "Максимум"],
+                               [("Онлайн", 500, 10, 30, 60, 12, 900), ("Касса", 8, 5, 9, 15, None, 40)])
+        self.assertIn("12 из 500", answer)
+        self.assertIn("Исключены группы", answer)
+        self.assertNotIn("12 из 508", answer)
+        only_small = recipe.answer(["Канал", "Наблюдений", "Q1", "Q3", "Верхняя граница", "Выбросов", "Максимум"],
+                                   [("Касса", 8, 5, 9, 15, None, 40)])
+        self.assertIn("Недостаточно наблюдений", only_small)
+        self.assertNotIn("Выбросов всего", only_small)
+
 
 
 @unittest.skipUnless(CATALOG.is_file() and VALUES.is_file(), "нет каталога")
