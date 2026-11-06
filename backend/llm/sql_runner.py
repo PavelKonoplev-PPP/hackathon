@@ -254,6 +254,33 @@ class PostgresRunner:
         _VALUES_CACHE[key] = values
         return values
 
+    def date_ranges(self, table: dict, columns: list[str]) -> dict[str, tuple]:
+        """Read-only MIN/MAX for several date columns in a single table scan.
+
+        Uses the same safe typed CTE and per-source cache as date_range().
+        The column names must belong to the supplied catalog table.
+        """
+        allowed = {c.get("name") for c in table.get("columns") or []
+                   if column_kind(c) in ("date", "timestamp")}
+        requested = list(dict.fromkeys(columns))
+        if not set(requested) <= allowed:
+            raise ValueError("Date range requested for a column without verified date type")
+        keys = {name: (self.source_key, self.schema, table["name"], name)
+                for name in requested}
+        missing = [name for name in requested if keys[name] not in _RANGE_CACHE]
+        if missing:
+            select = ", ".join(
+                item for name in missing
+                for item in (f"MIN({quote_ident(name)})", f"MAX({quote_ident(name)})")
+            )
+            result = self.run(table, f"SELECT {select} FROM t")
+            row = tuple(result.rows[0]) if result.rows else ()
+            if len(row) != 2 * len(missing):
+                raise RuntimeError("Unexpected column count in date range query")
+            for i, name in enumerate(missing):
+                _RANGE_CACHE[keys[name]] = (row[2 * i], row[2 * i + 1])
+        return {name: _RANGE_CACHE[keys[name]] for name in requested}
+
     def date_range(self, table: dict, column: str) -> tuple:
         """(минимум, максимум) колонки с датой — для «сентябрь» без года и «прошлый месяц»."""
         key = (self.source_key, self.schema, table["name"], column)
