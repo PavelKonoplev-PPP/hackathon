@@ -40,6 +40,43 @@ class LagAnalysisTests(unittest.TestCase):
         self.assertNotIn("lag(x", sql.lower())
         self.assertIn("реально совпадающим календарным датам", recipe.description)
 
+    def test_exact_safari_request_metrics_are_not_polluted_by_output_words(self):
+        from backend.llm.ask import answer_question
+        from backend.llm.test_ask import FakeRunner, ScriptedClient
+
+        # Real user wording: output instructions refer to a coefficient, to
+        # the count of paired days, and to the display action. None of those
+        # should become an extra measured series.
+        question = (
+            "В таблице «Рекламные кампании» проверь временной лаг между "
+            "кликами и выручкой от −7 до +7 дней. Покажи коэффициент "
+            "корреляции Пирсона, количество сопоставленных дней и "
+            "направление временного сдвига."
+        )
+        cluttered = {**TABLE, "name": "data_06_Рекламные_кампании",
+                     "columns": [*TABLE["columns"],
+                                 column("Количество, шт.", "integer"),
+                                 column("Коэффициент", "decimal")]}
+        self.assertEqual(la._metrics(question, cluttered),
+                         ("Клики", "Выручка, руб."))
+        plan = la.build_lag_plan(question, cluttered)
+        self.assertIsNotNone(plan)
+        self.assertIn("сдвигов от -7 до +7 дней", plan.description)
+        runner = FakeRunner(rows=[(3, 28, 0.88)],
+                            columns=["Лаг, дней", "Пар наблюдений", "Корреляция r"])
+        model = ScriptedClient([])
+        response = answer_question(question,
+                                   {"schema": "raw", "tables": [cluttered]},
+                                   runner, client=model)
+        self.assertIn("«Клики» предшествует «Выручка, руб.»", response["answer"])
+        self.assertIn("CORR(x, y)", response["sql"])
+        self.assertEqual(model.calls, [])
+
+    def test_extra_metric_inside_pair_clarifies_instead_of_guessing(self):
+        prompt = ("Проверь лаг между кликами и выручкой и показами "
+                  "от -7 до +7 дней. Покажи коэффициент.")
+        self.assertIsNone(la.build_lag_plan(prompt, TABLE))
+
     def test_requested_source_direction(self):
         plan = la.build_lag_plan(
             "Посмотри, опережают ли клики выручку с лагом 5 дней", TABLE)
