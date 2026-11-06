@@ -137,6 +137,55 @@ class ReleasePostgresSmokeTests(unittest.TestCase):
         finally:
             self.conn.execute("DROP TABLE IF EXISTS raw.ci_anomaly_qa")
 
+    def test_verified_lag_is_plus_three_days_on_known_postgres_series(self):
+        """#118: calendar-aligned +3 day signal, with a missing day, on real PG16."""
+        import datetime as dt
+        from backend.llm.lag_analysis import build_lag_plan
+        from backend.llm.sql_guard import validate_sql
+        from backend.llm.sql_runner import PostgresRunner
+
+        self.conn.execute(
+            'CREATE TABLE raw.ci_lag_qa '
+            '("Дата" text, "Клики" text, "Выручка, руб." text)'
+        )
+        try:
+            origin = dt.date(2025, 3, 1)
+            signals = [((i * 31 + i * i * 19 + 5) % 101) + 1 for i in range(30)]
+            values = []
+            for day in range(33):
+                if day == 10:  # calendar gap must not get row-position matched
+                    continue
+                clicks = str(signals[day]) if day < 30 else None
+                revenue = str(signals[day - 3] * 3 + 7) if 3 <= day < 33 else None
+                values.append((str(origin + dt.timedelta(days=day)), clicks, revenue))
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    'INSERT INTO raw.ci_lag_qa VALUES (%s, %s, %s)', values
+                )
+            fixture = {"name": "ci_lag_qa", "columns": [
+                {"name": "Дата", "inferred_type": "date",
+                 "conversion": {"target_type": "date", "policy": "safe_complete"}},
+                {"name": "Клики", "inferred_type": "integer",
+                 "conversion": {"target_type": "integer", "policy": "safe_with_nulls"}},
+                {"name": "Выручка, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_with_nulls"}},
+            ]}
+            plan = build_lag_plan(
+                "Проверь лаг между кликами и выручкой от -7 до +7 дней", fixture
+            )
+            self.assertIsNotNone(plan)
+            sql = validate_sql(plan.sql, [c["name"] for c in fixture["columns"]])
+            result = PostgresRunner(self.conn, schema="raw").run(fixture, sql)
+            self.assertTrue(result.rows)
+            winner = result.rows[0]
+            self.assertEqual(winner[0], 3)
+            self.assertEqual(winner[1], 28)
+            self.assertAlmostEqual(float(winner[2]), 1.0, places=4)
+            self.assertIn("на 3 дн.", plan.answer(result.columns, result.rows))
+            self.assertIn("пар наблюдений: 28", plan.answer(result.columns, result.rows))
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_lag_qa")
+
     def test_external_postgres_discovery_and_readonly_enforcement(self):
         from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
         from backend.llm.sql_runner import PostgresRunner
