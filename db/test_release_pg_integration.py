@@ -186,6 +186,84 @@ class ReleasePostgresSmokeTests(unittest.TestCase):
         finally:
             self.conn.execute("DROP TABLE IF EXISTS raw.ci_lag_qa")
 
+    def test_delivery_multisegment_average_count_percent_real_pg16(self):
+        """#121: user question with two groups, two periods and two metrics."""
+        from backend.llm import compare, segment_compare
+        from backend.llm.sql_guard import validate_sql
+        from backend.llm.sql_runner import PostgresRunner
+
+        # Never create fixtures outside the dedicated CI PostgreSQL database.
+        self.conn.execute(
+            'CREATE TABLE raw.ci_compare_qa '
+            '("Доставлено (МСК)" text, "Способ доставки" text, '
+            '"Перевозчик" text, "Стоимость доставки, руб." text)'
+        )
+        try:
+            rows = [
+                ("2025-03-01 10:00:00", "Курьером", "А", "100"),
+                ("2025-03-15 10:00:00", "Курьером", "А", "200"),
+                ("2025-03-31 23:59:59", "Курьером", "А", None),
+                ("2025-04-01 00:00:00", "Курьером", "А", "150"),
+                ("2025-04-30 20:00:00", "Курьером", "А", "300"),
+                ("2025-02-28 12:00:00", "Курьером", "А", "99999"),
+                ("2025-05-01 00:00:00", "Курьером", "А", "99999"),
+                ("2025-03-20 10:00:00", "Самовывоз", "Б", "0"),
+                ("2025-04-20 10:00:00", "Самовывоз", "Б", "100"),
+            ]
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO raw.ci_compare_qa VALUES (%s, %s, %s, %s)", rows
+                )
+
+            fixture = {"name": "ci_compare_qa", "columns": [
+                {"name": "Доставлено (МСК)", "inferred_type": "timestamp",
+                 "conversion": {"target_type": "timestamp", "policy": "safe_with_nulls"}},
+                {"name": "Способ доставки", "inferred_type": "category"},
+                {"name": "Перевозчик", "inferred_type": "category"},
+                {"name": "Стоимость доставки, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_with_nulls"}},
+            ]}
+            question = (
+                "Сравни среднюю стоимость доставки по способу доставки и "
+                "перевозчику за март и апрель 2025 года. По каждой комбинации "
+                "покажи количество доставок, среднюю стоимость в каждом месяце "
+                "и изменение в процентах."
+            )
+            periods = compare.parse_periods(question)
+            plan = segment_compare.build(question, fixture, periods, "Доставлено (МСК)")
+            self.assertIsNotNone(plan)
+            sql = validate_sql(plan.sql, [c["name"] for c in fixture["columns"]])
+            result = PostgresRunner(self.conn, schema="raw").run(fixture, sql)
+            by_group = {(row[0], row[1]): row for row in result.rows}
+            self.assertEqual(set(by_group), {("Курьером", "А"), ("Самовывоз", "Б")})
+            courier, other = by_group[("Курьером", "А")], by_group[("Самовывоз", "Б")]
+
+            reference = self.conn.execute(
+                'SELECT COUNT(*), AVG("Стоимость доставки, руб."::numeric) '
+                'FROM raw.ci_compare_qa WHERE "Способ доставки" = %s '
+                'AND "Перевозчик" = %s '
+                'AND "Доставлено (МСК)" >= %s AND "Доставлено (МСК)" < %s',
+                ("Курьером", "А", "2025-03-01", "2025-04-01"),
+            ).fetchone()
+            self.assertEqual(reference[0], 3)
+            self.assertEqual(reference[1], 150)
+            self.assertEqual(courier[2], reference[0])
+            self.assertEqual(courier[3], reference[1])
+            self.assertEqual(courier[4], 2)
+            self.assertEqual(courier[5], 225)
+            self.assertEqual(courier[6], 50)
+            self.assertEqual(other[2], 1)
+            self.assertEqual(other[4], 1)
+            self.assertEqual(other[3], 0)
+            self.assertEqual(other[5], 100)
+            self.assertIsNone(other[6])  # zero baseline must not become 100%
+
+            text = plan.answer(result.columns, result.rows)
+            self.assertIn("доставок 4 и 3", text)
+            self.assertIn("50.00%", text)
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_compare_qa")
+
     def test_external_postgres_discovery_and_readonly_enforcement(self):
         from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
         from backend.llm.sql_runner import PostgresRunner
