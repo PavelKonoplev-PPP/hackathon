@@ -95,13 +95,16 @@ def preflight() -> str:
         "import psycopg; "
         "c=psycopg.connect(host=__import__('sys').argv[1], "
         "port=int(__import__('sys').argv[2]), dbname=__import__('sys').argv[3], "
-        "user=__import__('sys').argv[4], password=__import__('sys').argv[5], "
+        "user=__import__('sys').argv[4], "
+        "password=__import__('os').environ['BI_CHECK_READER_PASSWORD'], "
         "connect_timeout=3, options='-c default_transaction_read_only=on'); "
         "assert c.execute('SELECT 1').fetchone()[0]==1; c.close()",
         env["POSTGRES_HOST"], env["POSTGRES_PORT"], env["POSTGRES_DB"],
-        env["POSTGRES_READER_USER"], env["POSTGRES_READER_PASSWORD"],
+        env["POSTGRES_READER_USER"],
     ]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    # Never place credentials in process command-line arguments.
+    check_env = {**os.environ, "BI_CHECK_READER_PASSWORD": env["POSTGRES_READER_PASSWORD"]}
+    result = subprocess.run(cmd, cwd=ROOT, env=check_env, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError("Не удалось выполнить SELECT 1 под ролью PostgreSQL только для чтения")
     return py
