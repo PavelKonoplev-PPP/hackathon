@@ -75,6 +75,68 @@ class ReleasePostgresSmokeTests(unittest.TestCase):
             cp_preview = preview_csv(cp, encoding="cp1251")
             self.assertEqual(cp_preview["rows"][0], ["001", "Готово"])
 
+    def test_anomaly_september_upper_tail_against_independent_pg16_reference(self):
+        """Regression #121: date first, then per-channel IQR; no lower-tail inflation."""
+        from backend.llm.recipes import anomaly_recipe
+        from backend.llm.sql_runner import PostgresRunner
+
+        # Guard in setUpClass ensures this entire fixture exists only in the
+        # disposable bi_ci_date_audit CI database, never in local raw.
+        self.conn.execute(
+            'CREATE TABLE raw.ci_anomaly_qa '
+            '("Дата операции (МСК)" text, "Канал продажи" text, "Сумма, руб." text)'
+        )
+        try:
+            rows = (
+                [("2025-09-01 12:00:00", "Интернет", "100")] * 20
+                + [("2025-09-25 12:00:00", "Интернет", "1000")]
+                + [("2025-08-01 12:00:00", "Интернет", "10000")] * 30
+                + [("2025-09-01 12:00:00", "Розница", "50")] * 8
+                + [("2025-09-25 12:00:00", "Розница", "500")]
+            )
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    'INSERT INTO raw.ci_anomaly_qa VALUES (%s, %s, %s)', rows
+                )
+
+            fixture = {"name": "ci_anomaly_qa", "columns": [
+                {"name": "Дата операции (МСК)", "inferred_type": "timestamp",
+                 "conversion": {"target_type": "timestamp", "policy": "safe_complete"}},
+                {"name": "Канал продажи", "inferred_type": "category"},
+                {"name": "Сумма, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_complete"}},
+            ]}
+            prompt = ("Найди аномально крупные суммы по каналам продаж "
+                      "за сентябрь 2025 года. Покажи количество выбросов и порог.")
+            recipe = anomaly_recipe(prompt, fixture)
+            self.assertIsNotNone(recipe)
+            runner = PostgresRunner(self.conn, schema="raw")
+            result = runner.run(fixture, recipe.sql)
+            by_channel = {r[0]: r for r in result.rows}
+            self.assertEqual(set(by_channel), {"Интернет", "Розница"})
+            online, retail = by_channel["Интернет"], by_channel["Розница"]
+
+            # Reference determined from 20 x 100, 1 x 1000 in September;
+            # 30 x 10000 in August would corrupt both thresholds if not filtered.
+            actual_september = self.conn.execute(
+                'SELECT COUNT(*) FROM raw.ci_anomaly_qa '
+                'WHERE "Канал продажи" = %s AND "Дата операции (МСК)" >= %s '
+                'AND "Дата операции (МСК)" < %s',
+                ("Интернет", "2025-09-01", "2025-10-01"),
+            ).fetchone()[0]
+            self.assertEqual(actual_september, 21)
+            self.assertEqual(online[1], actual_september)
+            self.assertEqual(online[4], 100)  # Q3=Q1=100 => upper bound=100
+            self.assertEqual(online[5], 1)    # exactly one *high* outlier
+            self.assertEqual(online[6], 1000)
+            self.assertEqual(retail[1], 9)
+            self.assertIsNone(retail[5])      # too few observations, no claim
+            answer = recipe.answer(result.columns, result.rows)
+            self.assertIn("1 из 21", answer)
+            self.assertIn("Розница", answer)
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_anomaly_qa")
+
     def test_external_postgres_discovery_and_readonly_enforcement(self):
         from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
         from backend.llm.sql_runner import PostgresRunner
