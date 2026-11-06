@@ -418,7 +418,7 @@ class AnswerTests(unittest.TestCase):
         sql = 'SELECT "Статус", COUNT(*) FROM t GROUP BY "Статус"'
         runner = FakeRunner(rows=[("Готово", 8), ("Ошибка", 2)],
                             columns=["Статус", "Количество"])
-        client = ScriptedClient(["\`\`\`sql\\n" + sql + "\\n\`\`\`", "Количество по статусам."])
+        client = ScriptedClient([sql, "Количество по статусам."])
         trace = {}
         response = answer_question(question, {"schema": "raw", "tables": [table]},
                                    runner, client=client, trace=trace)
