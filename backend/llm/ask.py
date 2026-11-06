@@ -226,6 +226,15 @@ def choose_table(question: str, tables: list[dict], values_by_table: dict,
     Кандидатов нет — вопрос не про эти данные."""
     if not tables:
         return None, []
+    # An explicit quoted table is a stronger signal than fuzzy metric words:
+    # "В таблице «Рекламные кампании» ...". Do not redirect its question
+    # to another dataset merely because the other table shares "выручка".
+    quoted_table = re.search(r'\bв\s+таблице\s*[«"]([^»"]+)[»"]', question,
+                             flags=re.IGNORECASE)
+    if quoted_table:
+        for named_table in tables:
+            if match_table_name(named_table, quoted_table.group(1)):
+                return named_table, []
     structural: list[int] = []
     scores = keyword_scores(question, tables, values_by_table, structural, schema)
     order = sorted(range(len(tables)), key=lambda i: -scores[i])
