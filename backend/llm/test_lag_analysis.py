@@ -72,6 +72,21 @@ class LagAnalysisTests(unittest.TestCase):
         self.assertIn("CORR(x, y)", response["sql"])
         self.assertEqual(model.calls, [])
 
+    def test_explicit_quoted_table_beats_fuzzy_table_ranking(self):
+        from backend.llm.ask import choose_table
+
+        ads = {**TABLE, "name": "data_06_Рекламные_кампании"}
+        sales = {"name": "data_01_Продажи", "columns": [
+            column("Клики", "integer"), column("Выручка, руб.", "decimal"),
+            column("Дата", "date"), {"name": "Канал", "inferred_type": "category"},
+        ]}
+        question = ("В таблице «Рекламные кампании» проверь временной лаг "
+                    "между кликами и выручкой от -7 до +7 дней. "
+                    "Покажи коэффициент корреляции.")
+        selected, candidates = choose_table(question, [sales, ads], {}, "raw")
+        self.assertEqual(selected["name"], "data_06_Рекламные_кампании")
+        self.assertEqual(candidates, [])
+
     def test_extra_metric_inside_pair_clarifies_instead_of_guessing(self):
         prompt = ("Проверь лаг между кликами и выручкой и показами "
                   "от -7 до +7 дней. Покажи коэффициент.")
