@@ -275,7 +275,7 @@ def segment_comparison_sql(
                     THEN ROUND(g.avg_2 - g.avg_1, 4) END AS "Изменение",
                CASE WHEN g.valid_1 >= cfg.min_sample AND g.valid_2 >= cfg.min_sample
                     THEN ROUND(100 * (g.avg_2 / NULLIF(g.avg_1, 0) - 1), 2)
-                    END AS "Изменение, %",
+                    END AS "Изменение, %%",
                CASE WHEN g.valid_1 >= cfg.min_sample AND g.valid_2 >= cfg.min_sample
                     THEN 'checked' ELSE 'insufficient_sample' END AS "Статус"
         FROM grouped g CROSS JOIN settings cfg
