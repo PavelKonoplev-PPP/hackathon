@@ -90,7 +90,7 @@ def shorten(text: str, name: str, max_sentences: int = 2) -> str:
     return text
 
 
-_UNEXPECTED_CJK = re.compile(r"[\\u3400-\\u9fff]")
+_UNEXPECTED_CJK = re.compile(r"[\u3400-\u9fff]")
 _DESCRIPTION_CACHE: OrderedDict[tuple[str, str, str], str] = OrderedDict()
 _DESCRIPTION_CACHE_LOCK = Lock()
 _DESCRIPTION_CACHE_MAX = 128
