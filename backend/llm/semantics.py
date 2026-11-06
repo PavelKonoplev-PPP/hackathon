@@ -342,13 +342,541 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
 def _check_group_in_select(sql: str) -> list[str]:
     """«SELECT SUM(x) FROM t GROUP BY "Статус"» — суммы без подписей групп: непонятно, где
     какая. Колонка разбивки обязана быть в SELECT (E2E 05.11, ho_delivery_cost_by_status)."""
-    from .kpis import select_items
+    from .kpis import select_items, _split_top
     m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
                   re.IGNORECASE | re.DOTALL)
     if not m or re.match(r"\s*with\b", sql, re.IGNORECASE):
         return []
     selected = " ".join(select_items(sql))
-    missing = [c for c in re.findall(r'"([^"]+)"', m.group(1)) if f'"{c}"' not in selected]
+    # GROUP BY may refer to a SELECT expression by its output alias:
+    # SELECT date_trunc('month', "Дата") AS "Месяц" ... GROUP BY "Месяц".
+    # select_items() intentionally removes aliases, so check them separately.
+    # An aggregate named "Месяц" is not a substitute for showing the group label.
+    select_clause = re.search(r"\bselect\b(.*?)\bfrom\s+t\b", sql,
+                              re.IGNORECASE | re.DOTALL)
+    visible_aliases = set()
+    if select_clause:
+        for item in _split_top(select_clause.group(1)):
+            match = re.search(r'\bas\s+"([^"]+)"\s*
+    if missing:
+        return [f"Колонка разбивки \"{missing[0]}\" есть в GROUP BY, но её нет в SELECT — "
+                f"добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
+    return []
+
+
+def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
+                   aliases: dict[str, list[str]] | None) -> list[str]:
+    """«Средняя оценка» означает AVG числовой оценки, а не COUNT-процент."""
+    if (not numeric_columns
+            or not re.search(r"\bсредн\w*", question, re.IGNORECASE)
+            or not re.search(r"\bоценк\w*", question, re.IGNORECASE)
+            or re.search(r"процент|дол[яиюей]|%|csat|nps", question, re.IGNORECASE)):
+        return []
+    asked = words(question)
+    matching = [c for c in numeric_columns
+                if re.search(r"оценк", c, re.IGNORECASE)
+                and overlap(asked, words(c) | _alias_words(c, aliases))]
+    if not matching:
+        return []
+    if any(re.search(
+            r'\bavg\s*\(\s*(?:distinct\s+)?(?:t\s*\.\s*)?"' + re.escape(c) + r'"\s*\)',
+            sql, re.IGNORECASE) for c in matching):
+        return []
+    options = " или ".join(f'AVG("{c}")' for c in matching)
+    return [f"Вопрос просит среднюю числовую оценку: используй {options}, а не процент от COUNT."]
+
+
+def _check_extra_conditions(sql: str, question: str,
+                            values: dict[str, list[str]],
+                            ignore: set[str] | None,
+                            aliases: dict[str, list[str]] | None,
+                            strict: bool = True) -> list[str]:
+    """Reject only the proven category inversion and unrequested NULL conditions.
+
+    Safe read-only analytical subqueries and explicit IS NOT NULL remain allowed.
+    SQL safety / write protection is handled by sql_guard separately.
+    """
+    problems = []
+    nested = re.findall(r"\bnot\s+in\s*\(\s*select\b[^)]*\)",
+                        sql, re.IGNORECASE | re.DOTALL)
+    for col, known in (values or {}).items():
+        for value in known:
+            if not mentions(question, value, ignore):
+                continue
+            literal = "'" + value.replace("'", "''") + "'"
+            condition = r'"' + re.escape(col) + r'"\s*=\s*' + re.escape(literal)
+            if any(re.search(condition, item, re.IGNORECASE) for item in nested):
+                problems.append(
+                    f'Для условия «{value}» используй WHERE "{col}" = {literal} '
+                    "в основном запросе; подзапросы NOT IN здесь инвертируют отбор.")
+    if not strict or re.search(
+            r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
+            question, re.IGNORECASE):
+        return problems
+    named = [(c, v) for c, known in (values or {}).items() for v in known
+             if mentions(question, v, ignore)]
+    if not any(
+            re.search(r'"' + re.escape(col) + r'"\s*=\s*' +
+                      re.escape("'" + value.replace("'", "''") + "'"),
+                      sql, re.IGNORECASE)
+            for col, value in named):
+        return problems
+    asked = _asked_words(question, ignore)
+    for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
+        if not overlap(asked, _short_words(column) | _alias_words(column, aliases)):
+            problems.append(f'Фильтр "{column}" IS NULL не упоминается в вопросе — убери его.')
+    return problems
+
+
+def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
+                 ignore: set[str] | None) -> list[str]:
+    """Доля значения от общего (#96): «доля обращений через чат» — одно число
+    100.0 * COUNT(*) FILTER (WHERE "Канал" = 'Чат') / COUNT(*), без GROUP BY по «Канал»
+    (иначе в каждой группе выходит 0% или 100%) и не COUNT(*)/COUNT(*)."""
+    problems = []
+    group = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
+                      re.IGNORECASE | re.DOTALL)
+    if intent.no_groups and group:
+        problems.append("В вопросе просят одно число без группировки — убери GROUP BY и колонку "
+                        "разбивки из SELECT.")
+    if not SHARE.search(question):
+        return problems
+    if re.search(r"count\s*\(\s*\*\s*\)\s*/\s*(nullif\s*\(\s*)?count\s*\(\s*\*\s*\)", sql,
+                 re.IGNORECASE):
+        problems.append("Доля COUNT(*)/COUNT(*) всегда 100%: в числителе нужен фильтр — "
+                        "COUNT(*) FILTER (WHERE условие), в знаменателе — все строки.")
+    named = [(col, v) for col, vs in (values or {}).items() for v in vs
+             if mentions(question, v, ignore)]
+    for col, v in named:
+        if group and f'"{col}"' in group.group(1) and not intent.wants_groups:
+            problems.append(f"Доля «{v}» от общего — одно число: 100.0 * COUNT(*) FILTER (WHERE "
+                            f"\"{col}\" = '{v}') / NULLIF(COUNT(*), 0) без GROUP BY по \"{col}\" "
+                            "(внутри группы доля всегда 0% или 100%).")
+            break
+    return problems
+
+
+def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
+              strict: bool = True, ignore: set[str] | None = None,
+              numeric_columns: list[str] | None = None,
+              columns: list[str] | None = None,
+              aliases: dict[str, list[str]] | None = None) -> list[str]:
+    """Смысловые проблемы SQL относительно вопроса. Пустой список — всё в порядке.
+
+    strict=False (последняя попытка) — не придираемся к упоминанию фильтров в вопросе.
+    ignore — слова названия таблицы (не считаются упоминанием значения).
+    numeric_columns — числовые колонки: «сколько кликов» при колонке «Клики» — это SUM.
+    columns — все колонки таблицы: для проверки группировок и пропущенных фильтров.
+    aliases — {колонка: синонимы} из бизнес-словаря: синоним тоже называет колонку.
+    """
+    problems = []
+    low = sql.lower()
+    if intent.is_count and not _AGG.search(sql):
+        problems.append("Вопрос «сколько»: нужен COUNT(...) или SUM(...), а не список строк.")
+    noun = counted_noun(question)
+    if intent.is_count and noun and numeric_columns:
+        # «Номер события в сессии» — порядковый номер, а не количество: его не суммируют
+        amounts = [c for c in numeric_columns if not re.match(r"(номер|код|id)\b", c, re.IGNORECASE)]
+        matching = [c for c in amounts if any(same_word(noun, w) for w in words(c))
+                    # «сколько штук» -> «Количество, шт.» (слово «шт» слишком короткое для words)
+                    or (noun.startswith("штук") and re.search(r"\bшт\b", c.lower()))]
+        summed = [c for c in matching
+                  if re.search(r'sum\s*\(\s*(t\.)?"' + re.escape(c) + '"', sql, re.IGNORECASE)]
+        if matching and not summed:
+            options = " или ".join(f'SUM("{c}")' for c in matching)
+            problems.append(f"«Сколько {noun}» — это сумма значений колонки: {options}, а не COUNT(*).")
+    if re.search(r"\bavg\s*\([^()]*\)\s*/\s*(count|sum)\s*\(", low):
+        problems.append("Не дели AVG(...) на COUNT/SUM: среднее уже посчитано — "
+                        "оставь просто AVG(\"колонка\").")
+    if re.search(r"\b100(\.0*)?\s*\*\s*avg\s*\(", low) and \
+            not re.search(r"процент|%|доля|долю|доли", question, re.IGNORECASE):
+        problems.append("Не умножай среднее на 100: проценты в вопросе не просили.")
+    problems += _check_average(sql, question, numeric_columns, aliases)
+    if intent.wants_distinct and "distinct" not in low:
+        problems.append("В вопросе «разных/уникальных»: считай COUNT(DISTINCT \"колонка\").")
+    if intent.time_grain and not re.search(r"date_trunc|extract|date_part", low):
+        problems.append(f"Нужна группировка по времени: date_trunc('{intent.time_grain}', "
+                        "\"колонка с датой\").")
+    elif intent.wants_groups and not re.search(r"\bgroup\s+by\b", low):
+        problems.append("В вопросе просят разбивку («по ...», «в каждом ...»): "
+                        "добавь GROUP BY по нужной колонке и выведи её в SELECT.")
+    if not re.search(r"\bfrom\s+t\b", low):
+        problems.append("Запрос должен брать данные из таблицы t.")
+
+    problems += _check_group_in_select(sql)
+    problems += _check_share(sql, question, intent, values, ignore)
+    problems += _check_extra_conditions(sql, question, values, ignore, aliases, strict)
+    if columns:
+        problems += _check_group_by(sql, question, columns, ignore, values, aliases)
+        problems += check_money(sql, question, columns)
+        problems += _check_missing_filter(sql, question, values, columns, ignore, strict, aliases)
+
+    value_owner = {v.lower(): col for col, vs in values.items() for v in vs}
+    for column, op, raw in _FILTER.findall(sql):
+        known = values.get(column)
+        if not known:
+            # значение известной категории приклеено к другой колонке
+            for literal in _literals(raw):
+                owner = value_owner.get(literal.strip("%").lower())
+                if owner and owner != column:
+                    problems.append(f"'{literal}' — значение колонки \"{owner}\", "
+                                    f"а не \"{column}\".")
+            continue  # у колонки много значений — не проверяем
+        known_low = {v.lower(): v for v in known}
+        for literal in _literals(raw):
+            text = literal.strip("%").lower()
+            if not text:
+                continue
+            if "like" in op.lower():
+                matched = [v for lv, v in known_low.items() if text in lv]
+            else:
+                matched = [known_low[text]] if text in known_low else []
+            if not matched:
+                problems.append(f"В колонке \"{column}\" нет значения '{literal}'. "
+                                f"Есть: " + ", ".join(f"'{v}'" for v in known) + ".")
+            elif strict and not any(mentions(question, v, ignore) for v in matched):
+                problems.append(f"Фильтр \"{column}\" = '{literal}' не упоминается в вопросе — "
+                                "убери его.")
+    return problems
+
+
+# ---------- вид графика по просьбе пользователя (issue #16) ----------
+
+VIEW_PATTERNS = [
+    ("pie", r"кругов\w*|кругом|пирог\w*"),
+    ("line", r"линейн\w*|линией|линиями|линию"),
+    ("bar", r"столбч\w*|столбц\w*|столбик\w*|гистограмм\w*"),
+    ("table", r"таблицей|в\s+виде\s+таблицы|как\s+таблицу|таблично"),
+]
+_VIEW_FILLER = {"покажи", "показать", "отобрази", "отобразить", "сделай", "нарисуй", "построй",
+                "давай", "можно", "пожалуйста", "это", "этот", "эти", "тоже", "самое", "же", "то",
+                "в", "виде", "как", "а", "и", "теперь", "график", "графиком", "графике",
+                "диаграмма", "диаграммой", "диаграмму", "диаграмме", "вид", "лучше", "мне", "его",
+                "их", "результат", "ответ", "данные", "на", "по", "форме", "формате", "вместо"}
+
+
+def requested_view(text: str) -> str | None:
+    """«покажи кругом» -> 'pie'; «по месяцам линией» -> 'line'; иначе None."""
+    low = text.lower()
+    for view, pattern in VIEW_PATTERNS:
+        if re.search(pattern, low):
+            return view
+    return None
+
+
+def is_pure_view_request(text: str) -> bool:
+    """Только смена вида («покажи то же самое кругом»), без новых условий («по месяцам линией»)."""
+    view = requested_view(text)
+    if not view:
+        return False
+    low = text.lower()
+    for _, pattern in VIEW_PATTERNS:
+        low = re.sub(pattern, " ", low)
+    rest = [w for w in re.findall(r"[а-яёa-z0-9]+", low) if w not in _VIEW_FILLER]
+    return not rest
+
+
+# ---------- выручка: количество × цена (× скидка) ----------
+
+MONEY = re.compile(r"выручк|оборот|доход|сумм\w*\s+продаж|продаж\w*\s+в\s+рубл", re.IGNORECASE)
+
+
+def money_parts(columns: list[str]) -> tuple[str, str, str | None] | None:
+    """Колонки количества, цены за единицу и скидки в процентах, если они есть в таблице."""
+    qty = next((c for c in columns if re.search(r"количеств", c, re.IGNORECASE)), None)
+    price = next((c for c in columns if re.search(r"цен", c, re.IGNORECASE)
+                  and re.search(r"единиц", c, re.IGNORECASE)), None)
+    disc = next((c for c in columns if re.search(r"скидк", c, re.IGNORECASE) and "%" in c), None)
+    return (qty, price, disc) if qty and price else None
+
+
+def money_formula(columns: list[str]) -> str | None:
+    parts = money_parts(columns)
+    if not parts:
+        return None
+    qty, price, disc = parts
+    inner = f'"{qty}" * "{price}"' + (f' * (1 - "{disc}" / 100.0)' if disc else "")
+    return f"SUM({inner})"
+
+
+def check_money(sql: str, question: str, columns: list[str]) -> list[str]:
+    """«Выручка» в таблице с ценой за единицу — обязательно количество × цена (× скидка)."""
+    parts = money_parts(columns)
+    if not parts or not MONEY.search(question):
+        return []
+    qty, price, disc = parts
+    formula = money_formula(columns)
+    if f'"{qty}"' not in sql or f'"{price}"' not in sql:
+        return [f"Выручка = {formula} — используй именно эту формулу."]
+    if disc and re.search(r"скидк", question, re.IGNORECASE) and not re.search(
+            r'1\s*-\s*"' + re.escape(disc) + r'"\s*/\s*100', sql):
+        return [f"С учётом скидки: {formula} — скидка делится на 100 внутри скобок."]
+    return []
+
+
+# ---------- Проверка невозможных запросов, безопасности и неоднозначностей (BI-05, Issue #33) ----------
+
+@dataclass
+class RefusalInfo:
+    topic: str
+    explanation: str
+    suggestions: list[str]
+    clarification: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.suggestions:
+            bullet_suggestions = "\n".join(f"- {s}" for s in self.suggestions)
+            full_answer = f"{self.explanation}\n\nВы можете запросить, например:\n{bullet_suggestions}"
+        else:
+            full_answer = self.explanation
+        return {
+            "answer": full_answer,
+            "chart": None,
+            "table": None,
+            "sql": None,
+            "clarification": self.clarification,
+            # явный признак для API и тестов точности: отказ ≠ «просто ответ без таблицы»
+            "status": "clarification" if self.clarification else "refused",
+        }
+
+
+DEFAULT_DATASET_SUGGESTIONS = [
+    "«Какая выручка с учётом скидки по каналам продаж?» (в данных продаж)",
+    "«Сколько потратили на рекламу по площадкам?» (в данных рекламы)",
+    "«Сколько обращений в техподдержку по каждому каналу?» (в техподдержке)",
+]
+
+# Деструктивные попытки модификации данных или схемы (DDL/DML)
+MUTATION_PATTERN = re.compile(
+    r"(\b(drop\s+(table|database|schema|view|index|function|procedure|all|\*)|"
+    r"delete\s+from|truncate\s+(table\s+)?|alter\s+(table|database|schema|view|index)|"
+    r"create\s+(table|database|schema|view|index)|grant\s+\w+|revoke\s+\w+)\b|"
+    r"^\s*(drop|delete|truncate|alter|insert|update|create|grant|revoke)\b|"
+    r";\s*(drop|delete|truncate|alter|insert|update|create|grant|revoke)\b|"
+    r"\binsert\s+into\b|\bupdate\s+\w+\s+set\b|"
+    r"\b(удали(те)?|удалить|сотри(те)?|стереть|дропни(те)?|дропнуть|снеси(те)?|снести|"
+    r"очисти(те)?|очистить|перезапиши(те)?|перезаписать|"
+    r"измени(те)?|изменить|обнови(те)?|обновить|поменяй(те)?|поменять|"
+    r"вставь(те)?|вставить|добавь(те)?|добавить)\b)",
+    re.IGNORECASE,
+)
+
+# Неподдерживаемые метрики и сущности, отсутствующие в датасете
+UNSUPPORTED_METRICS = [
+    (
+        "nps",
+        re.compile(
+            r"\b(nps|нпс|csat|ces)\b|net\s+promoter|индекс\w*(\s+\w+)?\s+лояльност|"
+            r"лояльност\w*(\s+\w+)?\s+клиент|удовлетворенност\w*(\s+\w+)?\s+клиент|готовност\w*\s+рекомендовать",
+            re.IGNORECASE,
+        ),
+        "В нашем датасете нет метрики NPS (Net Promoter Score) или результатов опросов удовлетворённости клиентов.",
+        [
+            "«Какая средняя оценка клиента по каналам обращения?» (в данных техподдержки)",
+            "«Сколько строк продаж с картой и без карты лояльности?» (в данных продаж)",
+            "«Сколько обращений в техподдержку по каждому каналу?»",
+        ],
+    ),
+    (
+        "roi",
+        re.compile(
+            r"\b(roi|рои|romi|роми|roas|роас)\b|окупаемост|рентабельност\w*(\s+\w+)?\s+(реклам|инвестиц|маркетинг)|"
+            r"возврат\w*\s+(на\s+)?инвестици",
+            re.IGNORECASE,
+        ),
+        "В текущих данных нет сквозного расчёта ROI/ROMI/ROAS: расходы на рекламу и продажи находятся в разных таблицах без единого сквозного идентификатора пользователя.",
+        [
+            "«Сколько потратили на рекламу по площадкам?» (в данных рекламы)",
+            "«Какая выручка с учётом скидки по каналам продаж?» (в данных продаж)",
+            "«Какой CTR по каждой рекламной площадке?» (в данных рекламы)",
+        ],
+    ),
+    (
+        "ltv",
+        re.compile(
+            r"\b(ltv|лтв|clv)\b|lifetime\s+value|пожизненн\w*\s+ценност",
+            re.IGNORECASE,
+        ),
+        "В доступных таблицах нет метрики LTV (пожизненной ценности клиента) или когортного анализа за длительный период.",
+        [
+            "«Сколько уникальных покупателей в продажах?»",
+            "«Какая выручка с учётом скидки по каналам продаж?»",
+            "«Сколько уникальных заказов без карты лояльности?»",
+        ],
+    ),
+    (
+        "tv_ads",
+        re.compile(
+            r"\b(на\s+тв|на\s+радио)\b|реклам\w*\s+на\s+тв|тв[- ]реклам\w*|телевидени\w*|телевизи\w*|"
+            r"по\s+телевизор\w*|радио[- ]реклам\w*|наружн\w*\s+реклам\w*|билборд\w*|баннер\w*\s+на\s+улиц\w*",
+            re.IGNORECASE,
+        ),
+        "В данных рекламных кампаний нет ТВ-рекламы, радио или наружной рекламы — представлены только цифровые площадки (Яндекс Директ, VK Реклама и др.).",
+        [
+            "«Сколько потратили на рекламу по площадкам?»",
+            "«Сколько всего было кликов по рекламе?»",
+            "«Какая выручка по рекламе Яндекс Директ и VK Реклама?»",
+        ],
+    ),
+    (
+        "salary",
+        re.compile(
+            r"\b(зарплат\w*|оклад\w*|фот|payroll)\b|фонд\s+оплаты\s+труда|"
+            r"преми[ияеейямх]|премировани\w*|премиальн\w*\s+(выплат\w*|фонд\w*|вознагражден\w*)",
+            re.IGNORECASE,
+        ),
+        "В датасете нет информации о заработной плате, премиях или фонде оплаты труда сотрудников.",
+        [
+            "«Какие средние фактические трудозатраты в часах по типам задач?» (в задачах команд)",
+            "«Какая общая запрошенная сумма по всем заявкам на закупку?» (в закупках)",
+            "«Сколько задач команд в каждом статусе?»",
+        ],
+    ),
+    (
+        "inventory",
+        re.compile(
+            r"\b(на\s+склад\w*|складск\w*|инвентаризаци\w*)\b|остат\w*\s+товар\w*|склад\w*",
+            re.IGNORECASE,
+        ),
+        "В системе нет учёта складских остатков и запасов на складах.",
+        [
+            "«Сколько штук товаров продано по каждому каналу продажи?» (в продажах)",
+            "«Какая общая запрошенная сумма по заявкам на закупку?» (в закупках)",
+            "«Сколько отправлений у каждого перевозчика?» (в доставке)",
+        ],
+    ),
+]
+
+# Неоднозначные и слишком общие запросы
+AMBIGUOUS_QUERY_PATTERN = re.compile(
+    r"^\s*(покажи|дай|сделай|какая|какие|какой|покажите|дайте|сделайте|что\s+с|как\s+там)?\s*"
+    r"(все|всю|всех|общ\w*|основн\w*|главн\w*|ключев\w*|любые|бизнес[-\s]*)?\s*"
+    r"(метрик\w*|статистик\w*|отчет\w*|отчёт\w*|аналитик\w*|сводк\w*|эффективност\w*|показател\w*|данные|данных|информаци\w*)"
+    r"(\s+(по\s+)?(данным|бизнес\w*|компани\w*|систем\w*))?\s*[?!.]*$",
+    re.IGNORECASE,
+)
+
+
+
+def check_destructive_mutation(question: str) -> RefusalInfo | None:
+    """Проверка попытки деструктивного изменения данных или схемы БД (DDL/DML)."""
+    if MUTATION_PATTERN.search(question):
+        return RefusalInfo(
+            topic="mutation_rejected",
+            explanation=(
+                "Я работаю с данными только на чтение: могу считать и показывать аналитику, "
+                "но не изменять и не удалять данные. Модификации схемы и данных (DDL/DML операции: "
+                "DROP, DELETE, UPDATE, ALTER, INSERT, TRUNCATE) запрещены политикой безопасности."
+            ),
+            suggestions=[
+                "«Какая выручка с учётом скидки по каналам продаж?»",
+                "«Сколько уникальных покупателей в продажах?»",
+                "«Сколько обращений в техподдержку по каждому каналу?»",
+            ],
+        )
+    return None
+
+
+def detect_out_of_scope(question: str, catalog: dict | None = None) -> RefusalInfo | None:
+    """Поиск запросов метрик или сущностей, отсутствующих в нашем датасете.
+
+    catalog — каталог АКТИВНОГО источника (с учётом выбранной таблицы). Неподдерживаемый
+    термин не вызывает отказ, только если КАЖДОЕ его упоминание в вопросе целиком покрыто
+    синонимом подтверждённого поля этого каталога из бизнес-словаря (BI-37): «CSAT» →
+    «Оценка клиента». «Какой NPS и CSAT?» — NPS не определён, отказ. Без каталога
+    (или для внешнего источника, если подтверждено только в raw) — отказ как раньше."""
+    covered = _glossary_spans(question, catalog)
+    for topic, pattern, explanation, suggestions in UNSUPPORTED_METRICS:
+        found = list(pattern.finditer(question))
+        if found:
+            uncovered = [m for m in found
+                         if not any(a <= m.start() and m.end() <= b for a, b in covered)]
+            if not uncovered:
+                continue  # этот термин команда сама определила для активного источника
+            if topic == "nps":  # называем именно неопределённые термины из вопроса (#100)
+                explanation = _satisfaction_explanation([m.group(0) for m in uncovered])
+            return RefusalInfo(
+                topic=topic,
+                explanation=explanation,
+                suggestions=suggestions,
+            )
+    return None
+
+
+_SATISFACTION_TERMS = [
+    (r"^(nps|нпс)$|net\s+promoter|готовност", "NPS (индекс готовности рекомендовать)"),
+    (r"^csat$", "CSAT (удовлетворённость клиентов)"),
+    (r"^ces$", "CES (индекс усилий клиента)"),
+    (r"лояльност", "индекса лояльности клиентов (NPS)"),
+    (r"удовлетвор", "удовлетворённости клиентов (CSAT)"),
+]
+
+
+def _satisfaction_explanation(matched: list[str]) -> str:
+    """Отказ называет именно спрошенные термины, а не всегда NPS (#100)."""
+    names = []
+    for text in matched:
+        low = text.lower().strip()
+        name = next((n for p, n in _SATISFACTION_TERMS if re.search(p, low)), text)
+        if name not in names:
+            names.append(name)
+    listed = ", ".join(names) if names else "NPS"
+    text = (f"В данных нет метрики {listed}: опросов удовлетворённости и рекомендаций в "
+            "загруженных таблицах нет.")
+    if any("CSAT" in n for n in names):
+        text += (" Ближайшее, что есть, — «Оценка клиента» в техподдержке. Если под CSAT "
+                 "понимается она, этот термин можно утвердить в бизнес-словаре — тогда я посчитаю.")
+    return text
+
+
+def _glossary_spans(question: str, catalog: dict | None) -> list[tuple[int, int]]:
+    """Где в вопросе стоят синонимы подтверждённых полей активного каталога."""
+    if not catalog:
+        return []
+    from .glossary import apply, synonyms  # glossary сам импортирует semantics
+    low = question.lower()
+    spans = []
+    for table in apply(catalog).get("tables") or []:
+        for column in table.get("columns") or []:
+            for synonym in synonyms(column):
+                pattern = r"(?<![а-яёa-z0-9])" + re.escape(synonym.lower()) + r"(?![а-яёa-z0-9])"
+                spans += [m.span() for m in re.finditer(pattern, low)]
+    return spans
+
+
+def detect_ambiguous_query(question: str) -> RefusalInfo | None:
+    """Определение слишком обобщённого или неоднозначного бизнес-вопроса."""
+    if AMBIGUOUS_QUERY_PATTERN.search(question.strip()):
+        return RefusalInfo(
+            topic="ambiguous_query",
+            explanation=(
+                "Вопрос сформулирован слишком обобщённо: в системе доступны данные по 9 направлениям бизнеса, "
+                "но в запросе не указана конкретная метрика или область анализа."
+            ),
+            suggestions=[
+                "«Какая выручка с учётом скидки по каналам продаж?» (Продажи)",
+                "«Сколько потратили на рекламу по площадкам?» (Реклама)",
+                "«Сколько обращений в техподдержку по каждому каналу?» (Поддержка)",
+            ],
+            clarification={
+                "question": "Какое направление данных вас интересует?",
+                "options": [
+                    "Продажи и выручка",
+                    "Техническая поддержка",
+                    "Рекламные кампании",
+                    "Доставка и логистика",
+                ],
+            },
+        )
+    return None
+
+, item, re.IGNORECASE)
+            if match and not re.search(
+                    r"\b(?:count|sum|avg|min|max|array_agg|percentile_cont)\s*\(",
+                    item, re.IGNORECASE):
+                visible_aliases.add(match.group(1))
+    missing = [c for c in re.findall(r'"([^"]+)"', m.group(1))
+               if f'"{c}"' not in selected and c not in visible_aliases]
     if missing:
         return [f"Колонка разбивки \"{missing[0]}\" есть в GROUP BY, но её нет в SELECT — "
                 f"добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
