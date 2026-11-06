@@ -66,6 +66,26 @@ class DateAuditPostgresIntegrationTests(unittest.TestCase):
             "scope": "full_column_valid_values",
         })
 
+    def test_batch_date_ranges_matches_individual_pg16_audit(self):
+        from backend.llm.sql_runner import PostgresRunner, clear_values_cache
+
+        clear_values_cache()
+        table = {"name": "ci_date_audit_fixture", "columns": [
+            {"name": "day_text", "inferred_type": "date",
+             "conversion": {"target_type": "date", "policy": "safe_with_nulls"}},
+            {"name": "timestamp_text", "inferred_type": "timestamp",
+             "conversion": {"target_type": "timestamp", "policy": "safe_with_nulls"}},
+            {"name": "numeric_text", "inferred_type": "decimal",
+             "conversion": {"target_type": "decimal", "policy": "safe_with_nulls"}},
+        ]}
+        runner = PostgresRunner(self.conn, schema="public", source="ci-date-batch")
+        ranges = runner.date_ranges(table, ["day_text", "timestamp_text"])
+        self.assertEqual(tuple(v.isoformat() for v in ranges["day_text"]),
+                         ("2025-02-01", "2025-03-31"))
+        self.assertEqual(tuple(v.isoformat() for v in ranges["timestamp_text"]),
+                         ("2025-02-01T09:30:00", "2025-03-31T23:59:00"))
+        self.assertEqual(runner.date_range(table, "day_text"), ranges["day_text"])
+
     def test_raw_data_unchanged_after_audit(self):
         rows = self.conn.execute("SELECT count(*) FROM public.ci_date_audit_fixture").fetchone()[0]
         self.assertEqual(rows, 4)
