@@ -396,6 +396,52 @@ class HoldoutFindingsTests(unittest.TestCase):
         good = 'SELECT "Перевозчик", AVG("Попытки вручения") FROM t GROUP BY 1'
         self.assertEqual(check_sql(good, q, Intent.parse(q), {}), [])
 
+    def test_avg_rating_rejects_percent_of_positive_scores(self):
+        question = "Какая средняя оценка клиента по каналам обращения?"
+        bad = ('SELECT "Канал обращения", '
+               '100.0 * COUNT(*) FILTER (WHERE "Оценка клиента" > 0) / COUNT(*) '
+               'AS "Средняя оценка клиента, %" FROM t GROUP BY "Канал обращения"')
+        for strict in (True, False):
+            with self.subTest(strict=strict):
+                errors = check_sql(
+                    bad, question, Intent.parse(question), {},
+                    strict=strict, numeric_columns=["Оценка клиента"],
+                    columns=["Канал обращения", "Оценка клиента"],
+                )
+                self.assertIn('AVG("Оценка клиента")', " ".join(errors))
+                self.assertIn("не долю положительных", " ".join(errors))
+
+    def test_avg_rating_accepts_actual_average(self):
+        question = "Какая средняя оценка клиента по каналам обращения?"
+        good = ('SELECT "Канал обращения", AVG("Оценка клиента") '
+                'AS "Средняя оценка" FROM t GROUP BY "Канал обращения"')
+        self.assertEqual(check_sql(
+            good, question, Intent.parse(question), {},
+            numeric_columns=["Оценка клиента"],
+            columns=["Канал обращения", "Оценка клиента"],
+        ), [])
+
+    def test_average_rating_check_does_not_reject_other_averages(self):
+        question = "Какая средняя стоимость доставки по способам доставки?"
+        sql = ('SELECT "Способ доставки", AVG("Стоимость доставки, руб.") '
+               'FROM t GROUP BY "Способ доставки"')
+        self.assertEqual(check_sql(
+            sql, question, Intent.parse(question), {},
+            numeric_columns=["Стоимость доставки, руб."],
+            columns=["Способ доставки", "Стоимость доставки, руб."],
+        ), [])
+
+    def test_average_rating_check_allows_explicit_share_request(self):
+        question = "Какова средняя доля положительных оценок по каналам обращения?"
+        sql = ('SELECT "Канал обращения", 100.0 * COUNT(*) FILTER '
+               '(WHERE "Оценка клиента" > 0) / NULLIF(COUNT(*), 0) '
+               'FROM t GROUP BY "Канал обращения"')
+        errors = check_sql(
+            sql, question, Intent.parse(question), {},
+            numeric_columns=["Оценка клиента"],
+        )
+        self.assertNotIn("Запрошена средняя числовая оценка", " ".join(errors))
+
     def test_group_by_column_named_like_table(self):
         cols = ["Команда", "Статус"]
         q = "Сколько задач у каждой команды?"
