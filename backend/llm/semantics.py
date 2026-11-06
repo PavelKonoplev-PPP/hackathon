@@ -415,7 +415,7 @@ def _check_extra_conditions(sql: str, question: str,
     asked = _asked_words(question, ignore)
     for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
         if not overlap(asked, _short_words(column) | _alias_words(column, aliases)):
-            problems.append(f'Фильтр по пустому значению "{column}" не упоминается в вопросе — убери его.')
+            problems.append(f'Фильтр "{column}" IS NULL не упоминается в вопросе — убери его.')
     return problems
 
 
