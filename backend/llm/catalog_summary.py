@@ -50,7 +50,10 @@ def table_row_count(table: dict) -> int | None:
     estimate = table.get("estimated_total_rows")
     if isinstance(estimate, int) and estimate >= 0:
         return estimate
-    rows = table.get("row_count") or table.get("rows")
+    # 0 is a valid exact row count; do not accidentally fall through on falsy zero.
+    rows = table.get("row_count")
+    if not isinstance(rows, int):
+        rows = table.get("rows")
     return rows if isinstance(rows, int) and rows >= 0 else None
 
 
@@ -149,6 +152,59 @@ def summarize_catalog(catalog: dict, relationships: dict | None = None,
         lines.append("")
         lines.append(relationships_section(relationships))
     return "\n".join(lines)
+
+def catalog_inventory_response(catalog: dict) -> dict:
+    """Read-only list of *all* tables and row counts in the active catalog.
+
+    Answer deterministically from the already selected datasource's metadata;
+    a source-wide inventory must not ask which single table to query. Explicitly
+    identify estimates or missing counts instead of inventing SQL results.
+    """
+    tables = [t for t in catalog.get("tables", []) if isinstance(t, dict)]
+    counted = []
+    estimated = 0
+    missing = 0
+    for table in tables:
+        count = table_row_count(table)
+        counted.append((display_table_name(table.get("name", "")), count))
+        if count is None:
+            missing += 1
+        else:
+            has_audited_count = any(
+                isinstance((col.get("conversion") or {}).get("quality"), dict)
+                and (col.get("conversion") or {}).get("quality", {}).get("total_rows") is not None
+                for col in table.get("columns", []) if isinstance(col, dict)
+            )
+            if not has_audited_count and isinstance(table.get("estimated_total_rows"), int):
+                estimated += 1
+
+    total = sum(count for _, count in counted if count is not None)
+    lines = [f"В текущем источнике по каталогу: {len(tables)} таблиц."]
+    if not missing:
+        lines.append(f"Всего строк по каталогу: {format_int(total)}.")
+    else:
+        lines.append(
+            f"Строк в таблицах с известным количеством: {format_int(total)}. "
+            f"Для {missing} таблиц количество строк не определено; "
+            "общий итог по источнику пока неизвестен."
+        )
+    if estimated:
+        lines.append(
+            f"Для {estimated} таблиц использована оценка числа строк из статистики "
+            "PostgreSQL, а не точный COUNT(*)."
+        )
+    lines.append("Количество строк и список таблиц получены из каталога выбранного источника.")
+    return {
+        "answer": " ".join(lines),
+        "table": {
+            "columns": ["Таблица", "Строк"],
+            "rows": [[name, format_int(count)] for name, count in counted],
+        },
+        "chart": None,
+        "sql": None,
+        "clarification": None,
+    }
+
 
 def date_range_section(catalog: dict) -> str:
     """Проверенные временные границы по полным колонкам, без предположений модели."""
