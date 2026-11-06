@@ -81,14 +81,22 @@ def quality_query(schema: str, table: str, column: str, kind: str) -> sql.Compos
         raise ValueError("Схема и таблица обязательны")
     source, _, valid, _ = cast_parts(column, kind)
     converted = safe_cast_expression(column, kind)
+    # MIN/MAX считаются в том же полном проходе, что и контроль качества.
+    # Для некорректных/пустых дат safe_cast возвращает NULL.
+    bounds = (
+        sql.SQL(", MIN({}) AS first_valid_date, MAX({}) AS last_valid_date").format(
+            converted, converted
+        )
+        if kind in ("date", "timestamp") else sql.SQL("")
+    )
     return sql.SQL(
         "SELECT count(*) AS total_rows, "
         "count(*) FILTER (WHERE {} IS NULL) AS missing_rows, "
         "count(*) FILTER (WHERE {} IS NOT NULL AND NOT coalesce({}, false)) AS invalid_rows, "
-        "count({}) AS convertible_rows "
+        "count({}) AS convertible_rows{} "
         "FROM {}"
     ).format(
-        source, source, valid, converted, sql.Identifier(schema, table)
+        source, source, valid, converted, bounds, sql.Identifier(schema, table)
     )
 
 
@@ -105,7 +113,7 @@ def audit_column(conn, schema: str, table: str, column: str, kind: str) -> dict:
         raise ValueError(f"Колонка {schema}.{table}.{column} недоступна")
 
     row = conn.execute(quality_query(schema, table, column, kind)).fetchone()
-    return {
+    result = {
         "schema": schema,
         "table": table,
         "column": column,
@@ -116,6 +124,14 @@ def audit_column(conn, schema: str, table: str, column: str, kind: str) -> dict:
         "convertible_rows": row[3],
         "source_modified": False,
     }
+    if kind in ("date", "timestamp"):
+        first, last = row[4], row[5]
+        result["date_range"] = {
+            "min": first.isoformat() if first is not None else None,
+            "max": last.isoformat() if last is not None else None,
+            "scope": "full_column_valid_values",
+        }
+    return result
 
 
 def main() -> int:

@@ -20,8 +20,8 @@ import re
 import sys
 from pathlib import Path
 
-from .catalog_summary import (display_table_name, match_table_name, overview_table, quality_section,
-                              relationships_section, summarize_catalog, table_block)
+from .catalog_summary import (date_range_section, display_table_name, match_table_name, overview_table,
+                              quality_section, relationships_section, summarize_catalog, table_block)
 
 RULES = """Правила:
 - Пиши по-русски, просто, для руководителя без технического опыта. Без SQL.
@@ -153,6 +153,7 @@ def describe_data(catalog: dict, relationships: dict | None = None,
         "Таблицы:\n" + "\n".join(f"{i}. «{name}» — {text}"
                                   for i, (name, text) in enumerate(parts, 1)),
         quality_section(catalog),
+        date_range_section(catalog),
     ]
     if links:
         sections.append(links)
@@ -185,6 +186,7 @@ def main() -> int:
         print(summarize_catalog(catalog, relationships))
         print()
         print(quality_section(catalog))
+        print(date_range_section(catalog))
         return 0
 
     result = describe_data(catalog, relationships,
