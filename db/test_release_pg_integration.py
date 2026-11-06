@@ -10,9 +10,6 @@ from pathlib import Path
 import psycopg
 
 from db.csv_service import import_uploaded_csv, preview_csv
-from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
-from backend.llm.sql_runner import PostgresRunner
-
 READER_USER = "bi_ci_reader"
 READER_PASSWORD = "ci_ephemeral_reader_password"
 
@@ -79,6 +76,9 @@ class ReleasePostgresSmokeTests(unittest.TestCase):
             self.assertEqual(cp_preview["rows"][0], ["001", "Готово"])
 
     def test_external_postgres_discovery_and_readonly_enforcement(self):
+        from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
+        from backend.llm.sql_runner import PostgresRunner
+
         ok, _ms, tables, msg = test_postgres_connection(
             host="127.0.0.1", port=5432, dbname="bi_ci_date_audit",
             user=READER_USER, password=READER_PASSWORD, schema_name="raw",
