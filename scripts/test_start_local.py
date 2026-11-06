@@ -2,6 +2,7 @@
 import io
 import json
 import socket
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,16 @@ class SafeStartupTests(unittest.TestCase):
     def test_configured_python_path_is_not_overridden(self):
         with patch.dict("os.environ", {"BI_PYTHON": "/opt/bi-env/bin/python"}):
             self.assertEqual(python_bin(), "/opt/bi-env/bin/python")
+
+    def test_venv_python_symlink_is_not_resolved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            venv_bin = Path(directory) / ".venv" / "bin"
+            venv_bin.mkdir(parents=True)
+            venv_python = venv_bin / "python"
+            venv_python.symlink_to(sys.executable)
+            with patch.dict("os.environ", {"BI_PYTHON": str(venv_python)}):
+                self.assertEqual(python_bin(), str(venv_python))
+                self.assertNotEqual(python_bin(), str(venv_python.resolve()))
 
     def test_cleanup_never_touches_unowned_processes(self):
         terminate_child(None)
