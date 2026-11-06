@@ -28,16 +28,20 @@ from pathlib import Path
 from collections import OrderedDict
 
 from . import advanced_analytics as adv
+from . import expert_metrics as em
+from . import expert_recipes as er
 from . import compare as cmp
 from . import glossary as gl
+from . import hypothesis as hp
 from . import kpis as kp
+from . import recipes as rc
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
                         adjust_sql, check_destructive_mutation, check_money, check_sql,
                         counted_noun, detect_ambiguous_query, detect_out_of_scope,
                         is_pure_view_request, mentions, money_formula, overlap, requested_view,
-                        SHARE,
+                        normalize_category_values, SHARE,
                         same_word, strip_unmentioned_filters, strong_word, words)
 from .sql_guard import SQLRejected, extract_sql, validate_sql
 from .sql_runner import column_kind
@@ -70,7 +74,9 @@ SQL_PROMPT = """Ты пишешь SQL для PostgreSQL 16. Все данные 
   SUM("колонка") для штук и денег. Никогда не отвечай списком строк.
 - «Разных», «уникальных» X — COUNT(DISTINCT "X").
 - WHERE добавляй только для условий, которые есть в вопросе. Значения категорий
-  бери только из списка, написание — точно как в списке.
+  бери только из списка, написание — точно как в списке. «Без карты», «через чат» —
+  это фильтр по значению: WHERE "колонка" = 'значение'. Без подзапросов (SELECT внутри
+  запроса) и без IS NULL, если о пустых значениях не спрашивали.
 - LIMIT только если просят «топ», «самые», «первые N». Иначе выведи все группы.
 - По месяцам: GROUP BY date_trunc('month', "дата") и ORDER BY по этой дате;
   по годам — date_trunc('year', ...).
@@ -220,6 +226,15 @@ def choose_table(question: str, tables: list[dict], values_by_table: dict,
     Кандидатов нет — вопрос не про эти данные."""
     if not tables:
         return None, []
+    # An explicit quoted table is a stronger signal than fuzzy metric words:
+    # "В таблице «Рекламные кампании» ...". Do not redirect its question
+    # to another dataset merely because the other table shares "выручка".
+    quoted_table = re.search(r'\bв\s+таблице\s*[«"]([^»"]+)[»"]', question,
+                             flags=re.IGNORECASE)
+    if quoted_table:
+        for named_table in tables:
+            if match_table_name(named_table, quoted_table.group(1)):
+                return named_table, []
     structural: list[int] = []
     scores = keyword_scores(question, tables, values_by_table, structural, schema)
     order = sorted(range(len(tables)), key=lambda i: -scores[i])
@@ -263,7 +278,32 @@ def unit_options(question: str, intent: Intent, table: dict) -> list[tuple[str, 
     ids = [c for c in table.get("columns") or []
            if c.get("inferred_type") == "identifier" and not c.get("warning") and c.get("sample_rows")]
     unique = [c for c in ids if (c.get("sample_distinct") or 0) >= c["sample_rows"]]
-    if not unique or any(same_word(noun, w) for c in unique for w in words(c["name"])):
+    # The entity may have an adjective: "Сколько фоновых заданий".
+    # counted_noun() returns "фоновых", but "заданий" matches "Код задания"
+    # and means one row per task. Ignore words after prepositions introducing
+    # a filter / grouping so an unrelated identifier cannot remove clarification.
+    subject = re.search(r"\bсколько\b([^?!.;,]*)", question, re.IGNORECASE)
+    subject_text = (re.split(
+        r"\b(?:в|во|на|по|через|за|для|у|от|из|с|со|при|без)\b",
+        subject.group(1), maxsplit=1, flags=re.IGNORECASE,
+    )[0] if subject else noun)
+    subject_words = words(subject_text) or {noun}
+    if not unique or any(
+        same_word(token, w)
+        for c in unique for w in words(c["name"]) for token in subject_words
+    ):
+        return []
+    # A unique row identifier plus a repeated secondary identifier alone does
+    # NOT prove the row is a line item. Background jobs, support tickets and
+    # other one-entity-per-row datasets routinely have both IDs. Ask about
+    # "rows vs unique entities" only with positive evidence of a *position*
+    # or line-item grain, such as sales "Код позиции" and repeated "Код заказа".
+    # Otherwise the user asked for a count of that table's entities.
+    positional_grain = any(
+        re.search(r"позици|строк|line[_\s-]?item|order[_\s-]?item|item[_\s-]?id", c["name"], re.IGNORECASE)
+        for c in unique
+    )
+    if not positional_grain:
         return []
     groups = [c for c in ids if 0.5 * c["sample_rows"] <= (c.get("sample_distinct") or 0) < c["sample_rows"]]
     groups = sorted(groups, key=lambda c: -(c.get("sample_distinct") or 0))[:2]
@@ -428,7 +468,7 @@ def answer_looks_good(answer: str, columns: list[str], rows: list[tuple]) -> boo
     return any(item and item in answer for item in shown)
 
 
-NON_ADDITIVE = re.compile(r"сред|доля|процент|%|медиан|рейтинг|оценк|минимал|максимал|ставк",
+NON_ADDITIVE = re.compile(r"сред|доля|процент|%|медиан|перцентил|квантил|p90|p95|рейтинг|оценк|минимал|максимал|ставк",
                           re.IGNORECASE)
 
 
@@ -894,6 +934,14 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     full_question = f"{previous['question']} {question}" if previous else question
     intent = Intent.parse(full_question)
 
+    # Открытые вопросы («можно ли утверждать…», «при каких условиях…»): считает код, модель не нужна
+    if not previous:
+        columns_total = len(table.get("columns") or [])
+        reply = hp.answer(question, table, runner, mentioned_columns(question, table, limit=columns_total), say)
+        if reply:
+            state["last"] = {"question": question, "table": table["name"], "sql": reply.get("sql") or ""}
+            return reply
+
     # Метрика должна быть в таблице до SQL (#98): «выручка» по таблице без денег — не считаем
     if MONEY.search(full_question) and not has_money(table):
         money_tables = [t for t in tables if has_money(t)]
@@ -974,6 +1022,23 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
 
+    # Доля значения от общего (#96): подсказываем точную формулу — одно число без группировки
+    if SHARE.search(full_question) and not intent.wants_groups:
+        share_values = (values_by_table or {}).get(table["name"])
+        if share_values is None:
+            try:
+                share_values = runner.category_values(table) or {}
+            except Exception:
+                share_values = {}
+        ignore_words = words(display_table_name(table["name"]))
+        named = [(col, v) for col, vs in share_values.items() for v in vs
+                 if mentions(full_question, v, ignore_words)]
+        if named:
+            col, v = named[0]
+            extra_hint += (f"\nЭто доля «{v}» от общего числа — ОДНО число, без GROUP BY: "
+                           f"SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE \"{col}\" = '{v}') / "
+                           f"NULLIF(COUNT(*), 0), 2) AS \"Доля, %\" FROM t\n")
+
     # Утверждённый бизнес-KPI (#57): формула из data/kpi-definitions.json, а не своя.
     # В сравнении периодов не используем: FILTER к составной формуле так не приклеить.
     kpi = None if periods else kp.for_question(full_question, table, catalog.get("schema"))
@@ -987,8 +1052,83 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if values is None:
         values = runner.category_values(table)
     column_names = [c["name"] for c in table.get("columns") or []]
+
+    # Verified two-period comparison with *both* AVG and delivery counts and
+    # two grouping dimensions. The general compare flow handles only one
+    # metric across two periods; allowing an LLM to improvise this shape can
+    # turn averages into SUM and introduce a spurious date GROUP BY.
+    from . import segment_compare as sc
+    segment_plan = sc.build(full_question, table, periods, date_col)
+    if segment_plan:
+        say(f"Проверенный многомерный расчёт: {segment_plan.description}")
+        try:
+            sql = validate_sql(segment_plan.sql, column_names)
+            result = runner.run(table, sql)
+        except Exception as exc:
+            trace["errors"].append(f"segment_compare: {exc}")
+            return _refuse(
+                "Не удалось надёжно рассчитать средние, количества и изменение "
+                "по двум периодам и сегментам. Непроверенные цифры не показываю.",
+                refused=False,
+            )
+        trace.update(sql=sql, columns=result.columns, rows=result.rows,
+                     recipe="segment_compare", attempts=0,
+                     periods=[p.label for p in segment_plan.periods])
+        state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
+        response = _result_response(result, sql, table, None, full_question)
+        response.pop("_note", None)
+        response["answer"] = segment_plan.answer(result.columns, result.rows)
+        # Do not plot counts, rubles and percentages on one axis.
+        chart = segment_plan.chart(result.rows)
+        if chart is not None:
+            response["chart"] = chart
+        else:
+            response.pop("chart", None)
+        return response
+
+    # 5a. Готовый расчёт по шаблону (#112–#114): перцентиль, состояние на дату, цепочки.
+    # SQL строит код из колонок таблицы — модель тут не нужна и не может ошибиться.
+    recipe = None if periods and len(periods) > 1 else rc.build(full_question, table, values)
+    from .lag_analysis import is_lag_request
+    if is_lag_request(full_question) and recipe is None:
+        return _refuse(
+            "Для вычисления временных лагов нужны два однозначно названных числовых "
+            "показателя и проверенное поле даты в одной таблице. Укажите, например: "
+            "«Проверь лаг между кликами и выручкой по дням от -7 до +7 дней». "
+            "Связи между разными таблицами без подтверждённого ключа не предполагаю.",
+            refused=False,
+        )
+    if recipe:
+        say(f"Готовый расчёт: {recipe.description}")
+        try:
+            sql = validate_sql(recipe.sql, column_names)
+            result = runner.run(table, sql)
+        except Exception as exc:  # не вышло — дальше обычным путём, через модель
+            trace["errors"].append(f"recipe: {exc}")
+            if recipe.kind == "lag":
+                # Never let the LLM invent a numerical lag when the verified
+                # temporal join cannot be executed or validated.
+                return _refuse(
+                    "Не удалось выполнить проверенный расчёт временных лагов. "
+                    "Числа и направление сдвига без расчёта не показываю.",
+                    refused=False,
+                )
+            say(f"Шаблон не сработал ({str(exc).splitlines()[0]}) — пишу SQL обычным путём")
+        else:
+            trace.update(sql=sql, columns=result.columns, rows=result.rows, recipe=recipe.kind,
+                         attempts=0)
+            state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
+            response = _result_response(result, sql, table, None, full_question)
+            response.pop("_note", None)
+            response["answer"] = recipe.answer(result.columns, result.rows)
+            response["table_name"] = table["name"]
+            return response
+
     numeric_columns = [c["name"] for c in table.get("columns") or []
                        if column_kind(c) in ("integer", "decimal")]
+    # Verified rules for expert metrics: only when the source has the
+    # requisite columns; no benchmark results are embedded in the prompt.
+    extra_hint += em.expert_sql_hint(full_question, column_names)
     table_words = words(display_table_name(table["name"]))
     history: list[dict] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -998,6 +1138,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                                                        extra_hint))
         try:
             sql = adjust_sql(validate_sql(extract_sql(reply), column_names), intent)
+            sql = normalize_category_values(sql, values)
             sql, removed = strip_unmentioned_filters(sql, full_question, values, table_words)
             if removed:
                 say(f"Убраны лишние фильтры: {'; '.join(removed)}")
@@ -1006,6 +1147,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                                  strict=attempt < MAX_ATTEMPTS, ignore=table_words,
                                  numeric_columns=numeric_columns, columns=column_names,
                                  aliases=gl.aliases(table))
+            problems += em.check_expert_sql(sql, full_question, column_names)
             if periods:
                 problems += cmp.check_compare_sql(sql, periods, date_col)
             if kpi:  # утверждённая формула обязательна на всех попытках: лучше честная
@@ -1024,9 +1166,34 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
                     {"role": "user", "content": f"{last_error}\nИсправь запрос. "
                                                 "Ответь только SQL в блоке ```sql```."}]
     else:
-        return _refuse("Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
-                       "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
-                       "разрезе нужен.", refused=False)
+        # Small local LLMs sometimes fail to produce a correct multi-stage
+        # SQL statement in three attempts. For narrowly identifiable metrics,
+        # use a deterministic formula only as a read-only fallback. The
+        # formula uses the user's dates and the selected table's columns,
+        # never cached benchmark numbers or free-form SQL from the prompt.
+        recipe = er.expert_sql_recipe(full_question, column_names) if not kpi else None
+        if recipe is not None:
+            try:
+                sql = validate_sql(recipe, column_names)
+                recipe_errors = em.check_expert_sql(sql, full_question, column_names)
+                if recipe_errors:
+                    raise SQLRejected(" ".join(recipe_errors))
+                result = runner.run(table, sql)
+                trace["expert_fallback"] = True
+                say("Сложный показатель рассчитан проверенной SQL-формулой")
+            except Exception as exc:
+                trace["errors"].append(
+                    f"Ошибка проверенной формулы: {str(exc).splitlines()[0]}"
+                )
+                return _refuse(
+                    "Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
+                    "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
+                    "разрезе нужен.", refused=False
+                )
+        else:
+            return _refuse("Не получилось надёжно посчитать ответ на этот вопрос, поэтому цифр не "
+                           "показываю. Попробуйте сформулировать проще: какой показатель и в каком "
+                           "разрезе нужен.", refused=False)
 
     trace.update(sql=sql, columns=result.columns, rows=result.rows)
     state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
@@ -1035,7 +1202,7 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
         return {"answer": "По такому запросу в данных ничего не нашлось. Проверьте условия "
                           "(период, значения фильтров).", "sql": shown_sql}
 
-    if periods:
+    if periods and not trace.get("expert_fallback"):
         enriched = cmp.enrich_compare(result.columns, result.rows, periods)
         if enriched:
             columns, rows, pair = enriched

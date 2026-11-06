@@ -36,7 +36,9 @@ def words(text: str) -> set[str]:
 
 
 def same_word(a: str, b: str) -> bool:
-    """«теме» ~ «тема», «каналам» ~ «канал», «розницу» ~ «розничный»: общее начало слова."""
+    """«теме» ~ «тема», but numeric years/IDs must match exactly."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -46,7 +48,9 @@ def same_word(a: str, b: str) -> bool:
 
 
 def strong_word(a: str, b: str) -> bool:
-    """Почти та же словоформа: «операций» ~ «операции», но не «оператора»."""
+    """Почти та же словоформа; числовые токены сравниваем строго."""
+    if a.isdigit() or b.isdigit():
+        return a == b
     common = 0
     for x, y in zip(a, b):
         if x != y:
@@ -248,6 +252,41 @@ def strip_unmentioned_filters(sql: str, question: str, values: dict[str, list[st
     return (sql[:start].rstrip() + where + sql[end:].lstrip()).strip(), removed
 
 
+
+def _value_tokens_match(left: str, right: str) -> bool:
+    """Match case-inflected category names but never conflate numeric IDs."""
+    a = re.findall(r"[а-яёa-z0-9]+", left.lower().replace("ё", "е"))
+    b = re.findall(r"[а-яёa-z0-9]+", right.lower().replace("ё", "е"))
+    if len(a) != len(b):
+        return False
+    return all(x == y if min(len(x), len(y)) < 4 else same_word(x, y)
+               for x, y in zip(a, b))
+
+
+def normalize_category_values(sql: str, values: dict[str, list[str]]) -> str:
+    """Use the exact catalog label for a unique grammatical match.
+
+    Leave unknown and ambiguous literals unchanged so the normal validation
+    can reject them or request clarification.
+    """
+    def replace_filter(match: re.Match) -> str:
+        column, op, raw = match.groups()
+        known = values.get(column)
+        if not known or "like" in op.lower():
+            return match.group(0)
+        fixed = raw
+        for literal in _literals(raw):
+            if literal.lower() in {v.lower() for v in known}:
+                continue
+            candidates = [v for v in known if _value_tokens_match(literal, v)]
+            if len(candidates) == 1:
+                old = "'" + literal.replace("'", "''") + "'"
+                new = "'" + candidates[0].replace("'", "''") + "'"
+                fixed = fixed.replace(old, new)
+        return f'"{column}" {op} {fixed}'
+
+    return _FILTER.sub(replace_filter, sql)
+
 def _asked_words(question: str, ignore: set[str] | None) -> set[str]:
     asked = words(question)
     if ignore:
@@ -335,6 +374,102 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
             + ", ".join(candidates[:4]) + ". Добавь нужное условие в WHERE."]
 
 
+def _check_group_in_select(sql: str) -> list[str]:
+    """Require group labels in SELECT, including computed aliases.
+
+    GROUP BY "Месяц" is valid when SELECT defines
+    date_trunc('month', date_column) AS "Месяц".
+    """
+    from .kpis import select_items, _split_top
+
+    m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
+                  re.IGNORECASE | re.DOTALL)
+    if not m or re.match(r"\s*with\b", sql, re.IGNORECASE):
+        return []
+
+    selected = " ".join(select_items(sql))
+    select_clause = re.search(r"\bselect\b(.*?)\bfrom\s+t\b", sql,
+                              re.IGNORECASE | re.DOTALL)
+    visible_aliases: set[str] = set()
+    if select_clause:
+        for item in _split_top(select_clause.group(1)):
+            alias = re.search(r'\bas\s+"([^"]+)"\s*$', item, re.IGNORECASE)
+            if alias and not re.search(
+                    r"\b(?:count|sum|avg|min|max|array_agg|percentile_cont)\s*\(",
+                    item, re.IGNORECASE):
+                visible_aliases.add(alias.group(1))
+
+    missing = [column for column in re.findall(r'"([^"]+)"', m.group(1))
+               if f'"{column}"' not in selected and column not in visible_aliases]
+    if missing:
+        return [f'Колонка разбивки "{missing[0]}" есть в GROUP BY, но её нет в SELECT — '
+                "добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
+    return []
+
+def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
+                   aliases: dict[str, list[str]] | None) -> list[str]:
+    """«Средняя оценка» означает AVG числовой оценки, а не COUNT-процент."""
+    if (not numeric_columns
+            or not re.search(r"\bсредн\w*", question, re.IGNORECASE)
+            or not re.search(r"\bоценк\w*", question, re.IGNORECASE)
+            or re.search(r"процент|дол[яиюей]|%|csat|nps", question, re.IGNORECASE)):
+        return []
+    asked = words(question)
+    matching = [c for c in numeric_columns
+                if re.search(r"оценк", c, re.IGNORECASE)
+                and overlap(asked, words(c) | _alias_words(c, aliases))]
+    if not matching:
+        return []
+    if any(re.search(
+            r'\bavg\s*\(\s*(?:distinct\s+)?(?:t\s*\.\s*)?"' + re.escape(c) + r'"\s*\)',
+            sql, re.IGNORECASE) for c in matching):
+        return []
+    options = " или ".join(f'AVG("{c}")' for c in matching)
+    return [f"Вопрос просит среднюю числовую оценку: используй {options}, а не процент от COUNT."]
+
+
+def _check_extra_conditions(sql: str, question: str,
+                            values: dict[str, list[str]],
+                            ignore: set[str] | None,
+                            aliases: dict[str, list[str]] | None,
+                            strict: bool = True) -> list[str]:
+    """Reject only the proven category inversion and unrequested NULL conditions.
+
+    Safe read-only analytical subqueries and explicit IS NOT NULL remain allowed.
+    SQL safety / write protection is handled by sql_guard separately.
+    """
+    problems = []
+    nested = re.findall(r"\bnot\s+in\s*\(\s*select\b[^)]*\)",
+                        sql, re.IGNORECASE | re.DOTALL)
+    for col, known in (values or {}).items():
+        for value in known:
+            if not mentions(question, value, ignore):
+                continue
+            literal = "'" + value.replace("'", "''") + "'"
+            condition = r'"' + re.escape(col) + r'"\s*=\s*' + re.escape(literal)
+            if any(re.search(condition, item, re.IGNORECASE) for item in nested):
+                problems.append(
+                    f'Для условия «{value}» используй WHERE "{col}" = {literal} '
+                    "в основном запросе; подзапросы NOT IN здесь инвертируют отбор.")
+    if not strict or re.search(
+            r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
+            question, re.IGNORECASE):
+        return problems
+    named = [(c, v) for c, known in (values or {}).items() for v in known
+             if mentions(question, v, ignore)]
+    if not any(
+            re.search(r'"' + re.escape(col) + r'"\s*=\s*' +
+                      re.escape("'" + value.replace("'", "''") + "'"),
+                      sql, re.IGNORECASE)
+            for col, value in named):
+        return problems
+    asked = _asked_words(question, ignore)
+    for column in re.findall(r'"([^"]+)"\s+is\s+null\b', sql, re.IGNORECASE):
+        if not overlap(asked, _short_words(column) | _alias_words(column, aliases)):
+            problems.append(f'Фильтр "{column}" IS NULL не упоминается в вопросе — убери его.')
+    return problems
+
+
 def _check_share(sql: str, question: str, intent: Intent, values: dict[str, list[str]],
                  ignore: set[str] | None) -> list[str]:
     """Доля значения от общего (#96): «доля обращений через чат» — одно число
@@ -398,6 +533,7 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if re.search(r"\b100(\.0*)?\s*\*\s*avg\s*\(", low) and \
             not re.search(r"процент|%|доля|долю|доли", question, re.IGNORECASE):
         problems.append("Не умножай среднее на 100: проценты в вопросе не просили.")
+    problems += _check_average(sql, question, numeric_columns, aliases)
     if intent.wants_distinct and "distinct" not in low:
         problems.append("В вопросе «разных/уникальных»: считай COUNT(DISTINCT \"колонка\").")
     if intent.time_grain and not re.search(r"date_trunc|extract|date_part", low):
@@ -409,7 +545,9 @@ def check_sql(sql: str, question: str, intent: Intent, values: dict[str, list[st
     if not re.search(r"\bfrom\s+t\b", low):
         problems.append("Запрос должен брать данные из таблицы t.")
 
+    problems += _check_group_in_select(sql)
     problems += _check_share(sql, question, intent, values, ignore)
+    problems += _check_extra_conditions(sql, question, values, ignore, aliases, strict)
     if columns:
         problems += _check_group_by(sql, question, columns, ignore, values, aliases)
         problems += check_money(sql, question, columns)

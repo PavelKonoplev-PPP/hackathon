@@ -397,6 +397,74 @@ class AnswerTests(unittest.TestCase):
         q = "Сколько событий на каждой платформе?"
         self.assertEqual(unit_options(q, Intent.parse(q), table), [])
 
+    def test_count_background_jobs_by_status_no_spurious_unit_question(self):
+        """75/75 API regression: counted entity includes adjective 'фоновых'."""
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        table = {"name": "data_08_Фоновые_задания", "columns": [
+            {"name": "Код задания", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 200},
+            {"name": "Код запуска", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 180},
+            {"name": "Статус", "inferred_type": "category",
+             "sample_rows": 200, "sample_distinct": 4},
+        ]}
+        question = "Сколько фоновых заданий в каждом статусе?"
+        self.assertEqual(unit_options(question, Intent.parse(question), table), [])
+        # No model text is needed for the unit decision. Continue to ordinary
+        # SQL generation, not to clarification about job positions.
+        from backend.llm.ask import answer_question, _SESSIONS
+        _SESSIONS.clear()
+        sql = 'SELECT "Статус", COUNT(*) FROM t GROUP BY "Статус"'
+        runner = FakeRunner(rows=[("Готово", 8), ("Ошибка", 2)],
+                            columns=["Статус", "Количество"])
+        client = ScriptedClient([sql, "Количество по статусам."])
+        trace = {}
+        response = answer_question(question, {"schema": "raw", "tables": [table]},
+                                   runner, client=client, trace=trace)
+        self.assertIsNone(response.get("clarification"))
+        self.assertIn("GROUP BY", response.get("sql", ""))
+        self.assertEqual(trace.get("table"), table["name"])
+        self.assertNotEqual(trace.get("clarification"), "unit")
+
+    def test_job_count_is_clear_with_generic_row_and_run_identifiers(self):
+        """# Regression in full API eval: no position grain, despite two IDs."""
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        q = "Сколько фоновых заданий в каждом статусе?"
+        table = {"name": "data_08_Фоновые_задания", "columns": [
+            {"name": "Код записи", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 200},
+            {"name": "Код запуска", "inferred_type": "identifier",
+             "sample_rows": 200, "sample_distinct": 180},
+            {"name": "Статус", "inferred_type": "category"},
+        ]}
+        self.assertEqual(unit_options(q, Intent.parse(q), table), [])
+
+    def test_other_entity_with_two_ids_is_not_assumed_a_line_item(self):
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        q = "Сколько обращений в каждом статусе?"
+        table = {"name": "data_02_Обращения", "columns": [
+            {"name": "Номер обращения", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 300},
+            {"name": "Номер клиента", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 240},
+            {"name": "Статус", "inferred_type": "category"},
+        ]}
+        self.assertEqual(unit_options(q, Intent.parse(q), table), [])
+
+    def test_unit_question_not_bypassed_by_unrelated_group_identifier(self):
+        from backend.llm.ask import unit_options
+        from backend.llm.semantics import Intent
+        table = {"name": "data_01_Продажи", "columns": [
+            {"name": "Код позиции", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 300},
+            {"name": "Код заказа", "inferred_type": "identifier",
+             "sample_rows": 300, "sample_distinct": 280},
+        ]}
+        self.assertTrue(unit_options("Сколько продаж по каналам?", Intent.parse("Сколько продаж по каналам?"), table))
+
     def test_unit_clarification(self):
         result, _, trace = ask("Сколько продаж через интернет-магазин?", [], session="s2")
         self.assertEqual(trace["clarification"], "unit")
@@ -669,6 +737,7 @@ class E2EFindingsTests(unittest.TestCase):
         result, client, trace = ask("А какая доля продаж приходится на мобильное приложение?",
                                     [share, "x"], runner, session="s")
         self.assertEqual(len(client.calls[0]), 2)  # без прошлого SQL с GROUP BY
+        self.assertIn("ОДНО число, без GROUP BY", client.calls[0][0]["content"])
         self.assertEqual(trace["errors"], [])
         self.assertEqual(trace["table"], "data_01_Продажи")
 

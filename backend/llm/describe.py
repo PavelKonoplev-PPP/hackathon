@@ -15,18 +15,22 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import re
+from collections import OrderedDict
+from threading import Lock
 import sys
 from pathlib import Path
 
-from .catalog_summary import (display_table_name, match_table_name, overview_table, quality_section,
-                              relationships_section, summarize_catalog, table_block)
+from .catalog_summary import (display_table_name, format_int, match_table_name, overview_table,
+                              quality_section, relationships_section, summarize_catalog, table_block)
 
 RULES = """Правила:
 - Пиши по-русски, просто, для руководителя без технического опыта. Без SQL.
 - Используй ТОЛЬКО то, что дано ниже. Не придумывай поля, цифры и периоды.
-- Не пересказывай список колонок — объясняй смысл."""
+- Не пересказывай список колонок — объясняй смысл.
+- Отвечай только по-русски; не вставляй иероглифы или случайные слова на других языках, если их нет в исходном каталоге."""
 
 TABLE_PROMPT = f"""Ты — аналитик данных. Тебе дали описание одной таблицы из незнакомой базы.
 Напиши 2 предложения: 1) что хранит эта таблица (о каком процессе бизнеса);
@@ -86,17 +90,161 @@ def shorten(text: str, name: str, max_sentences: int = 2) -> str:
     return text
 
 
+_UNEXPECTED_CJK = re.compile(r"[\u3400-\u9fff]")
+_DESCRIPTION_CACHE: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+_DESCRIPTION_CACHE_LOCK = Lock()
+_DESCRIPTION_CACHE_MAX = 128
+
+
+def _description_fallback(table: dict) -> str:
+    """Avoid displaying non-Russian hallucinations absent from the source schema."""
+    name = display_table_name(table.get("name", ""))
+    columns = [str(c["name"]) for c in table.get("columns") or []
+               if isinstance(c, dict) and c.get("name")][:3]
+    if columns:
+        fields = ", ".join(f"«{c}»" for c in columns)
+        return (f"Содержит записи таблицы «{name}». "
+                f"Среди доступных для анализа полей: {fields}.")
+    return f"Содержит данные таблицы «{name}». Для анализа нужны сведения о её полях."
+
+
 def describe_table(client, table: dict) -> str:
-    text = client.chat([
+    block = table_block(table)
+    settings = getattr(client, "settings", None)
+    model = getattr(settings, "model", None)
+    base_url = getattr(settings, "base_url", None)
+    # Cache only descriptions for explicitly identified model/provider; the
+    # full catalog table block is part of the key, so schema changes invalidate.
+    key = (base_url, model, block) if model and base_url else None
+    if key is not None:
+        with _DESCRIPTION_CACHE_LOCK:
+            if key in _DESCRIPTION_CACHE:
+                _DESCRIPTION_CACHE.move_to_end(key)
+                return _DESCRIPTION_CACHE[key]
+    raw = client.chat([
         {"role": "system", "content": TABLE_PROMPT},
-        {"role": "user", "content": table_block(table)},
+        {"role": "user", "content": block},
     ], max_tokens=200)
-    return shorten(text, display_table_name(table["name"]))
+    if _UNEXPECTED_CJK.search(raw) and not _UNEXPECTED_CJK.search(block):
+        text = _description_fallback(table)
+    else:
+        text = shorten(raw, display_table_name(table["name"]))
+    if key is not None:
+        with _DESCRIPTION_CACHE_LOCK:
+            _DESCRIPTION_CACHE[key] = text
+            _DESCRIPTION_CACHE.move_to_end(key)
+            if len(_DESCRIPTION_CACHE) > _DESCRIPTION_CACHE_MAX:
+                _DESCRIPTION_CACHE.popitem(last=False)
+    return text
+
+
+def _fmt_date(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, dt.datetime):
+        return value.strftime("%d.%m.%Y")
+    if isinstance(value, dt.date):
+        return value.strftime("%d.%m.%Y")
+    return str(value)[:10]
+
+
+def _as_date(value):
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    try:
+        return dt.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def period_section(catalog: dict, runner=None) -> str:
+    """Фактический охват данных по датам (#119): MIN/MAX каждого поля даты — по корректным
+    значениям (тип в базе уже приведён), с числом пустых и некорректных значений из каталога.
+    Значения кэшируются по источнику (PostgresRunner.date_range), профиль на каждый вопрос
+    не пересчитывается. Ничего не выдумывается: нет поля даты или нет статистики — так и пишем."""
+    from .sql_runner import column_kind
+
+    lines, mins, maxs = [], [], []
+    for table in catalog.get("tables") or []:
+        name = display_table_name(table["name"])
+        columns = table.get("columns") or []
+        dates = [c for c in columns if column_kind(c) in ("date", "timestamp")
+                 or ((c.get("conversion") or {}).get("date_range") or {}).get("scope")
+                 == "full_column_valid_values"]
+        unsure = [c["name"] for c in columns
+                  if c.get("inferred_type") in ("date", "timestamp")
+                  and column_kind(c) is None and c not in dates]
+        if not dates:
+            note = "нет поля даты — период определить нельзя"
+            if unsure:
+                note = ("поле даты неоднозначно (формат подтверждён не на всех строках): "
+                        + ", ".join(f"«{u}»" for u in unsure) + " — период не рассчитан")
+            lines.append(f"- «{name}»: {note}.")
+            continue
+        # Group date aggregates into one read-only SQL scan per table when the
+        # runner supports batching. Older runners still use date_range().
+        ranges = {}
+        if runner is not None and hasattr(runner, "date_ranges"):
+            try:
+                verified = [c["name"] for c in dates
+                            if column_kind(c) in ("date", "timestamp")]
+                ranges = runner.date_ranges(table, verified)
+            except Exception:
+                ranges = {}
+        parts = []
+        for col in dates:
+            quality = (col.get("conversion") or {}).get("quality") or {}
+            total = quality.get("total_rows")
+            missing = quality.get("missing_rows") or 0
+            invalid = quality.get("invalid_rows") or 0
+            low = high = None
+            if col["name"] in ranges:
+                low, high = ranges[col["name"]]
+            elif runner is not None:
+                try:
+                    low, high = runner.date_range(table, col["name"])
+                except Exception:
+                    low = high = None
+            audited = (col.get("conversion") or {}).get("date_range") or {}
+            if (low is None or high is None) and audited.get("scope") == "full_column_valid_values":
+                low, high = audited.get("min"), audited.get("max")
+            if low is None and high is None:
+                span = ("корректных дат нет" if audited.get("scope")
+                        == "full_column_valid_values" else "статистика не рассчитана")
+            else:
+                span = f"с {_fmt_date(low)} по {_fmt_date(high)}"
+                if (col.get("conversion") or {}).get("policy") == "safe_complete":
+                    mins.append(_as_date(low))
+                    maxs.append(_as_date(high))
+            extra = []
+            if total and missing:
+                extra.append(f"заполнено {format_int(total - missing)} из {format_int(total)}")
+            if invalid:
+                extra.append(f"некорректных значений: {format_int(invalid)}")
+            parts.append(f"«{col['name']}» {span}" + (f" ({'; '.join(extra)})" if extra else ""))
+        lines.append(f"- «{name}»: " + "; ".join(parts) + ".")
+    mins = [m for m in mins if m]
+    maxs = [m for m in maxs if m]
+    header = ["Период данных (по полям дат, только корректные значения):"]
+    if len(catalog.get("tables") or []) > 1 and mins and maxs:
+        header.append(
+            f"- Общий диапазон значений полей даты: с {_fmt_date(min(mins))} "
+            f"по {_fmt_date(max(maxs))}. "
+            "Включает разные виды дат, в том числе плановые сроки и будущие дедлайны; "
+            "это не период фактически совершённых операций. "
+            "Период каждой таблицы и события смотрите ниже."
+        )
+    return "\n".join(header + lines)
 
 
 def describe_data(catalog: dict, relationships: dict | None = None,
-                  client=None, progress=None, table_name: str | None = None) -> dict:
-    """Возвращает ответ в формате docs/api-contract.md: answer + table."""
+                  client=None, progress=None, table_name: str | None = None,
+                  runner=None) -> dict:
+    """Возвращает ответ в формате docs/api-contract.md: answer + table.
+    runner — для фактических границ дат (#119); без него период честно помечается как
+    не рассчитанный."""
     if client is None:
         from .client import LLMClient
         client = LLMClient()
@@ -152,6 +300,7 @@ def describe_data(catalog: dict, relationships: dict | None = None,
         overview.split("Что можно спросить")[0].strip(),
         "Таблицы:\n" + "\n".join(f"{i}. «{name}» — {text}"
                                   for i, (name, text) in enumerate(parts, 1)),
+        period_section(catalog, runner),
         quality_section(catalog),
     ]
     if links:
@@ -185,6 +334,8 @@ def main() -> int:
         print(summarize_catalog(catalog, relationships))
         print()
         print(quality_section(catalog))
+        print()
+        print(period_section(catalog))
         return 0
 
     result = describe_data(catalog, relationships,

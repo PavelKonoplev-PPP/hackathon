@@ -102,6 +102,26 @@ def build_catalog(profile: dict, audit: dict, *, include_examples: bool = False)
                     if missing + invalid + convertible != total:
                         raise ValueError(f"Несогласованные счётчики: {key}")
                     conversion["quality"] = dict(zip(names, counts))
+                    if kind in ("date", "timestamp") and "date_range" in item:
+                        date_range = item["date_range"]
+                        if not isinstance(date_range, dict):
+                            raise ValueError(f"Некорректный диапазон дат: {key}")
+                        lower, upper = date_range.get("min"), date_range.get("max")
+                        if date_range.get("scope") != "full_column_valid_values":
+                            raise ValueError(f"Диапазон дат не подтверждён полным аудитом: {key}")
+                        if convertible == 0:
+                            if lower is not None or upper is not None:
+                                raise ValueError(f"У пустой колонки не может быть границ дат: {key}")
+                        elif (
+                            not isinstance(lower, str) or not isinstance(upper, str)
+                            or not lower or not upper or lower > upper
+                        ):
+                            raise ValueError(f"Некорректные границы дат: {key}")
+                        conversion["date_range"] = {
+                            "min": lower,
+                            "max": upper,
+                            "scope": "full_column_valid_values",
+                        }
                     if invalid:
                         policy = "blocked_invalid"
                     elif not convertible:

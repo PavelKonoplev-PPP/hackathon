@@ -472,5 +472,97 @@ class ShareTests(unittest.TestCase):
         self.assertEqual(self.check(q, sql), "")
 
 
+
+class CategoryNormalizationTests(unittest.TestCase):
+    """Preserve unambiguous category-case normalization from draft PR #132."""
+
+    def test_unique_case_ending_uses_exact_catalog_value(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = ('SELECT COUNT(*) FILTER (WHERE "Канал обращения" = '
+               "'Чат в приложение') FROM t")
+        values = {"Канал обращения": ["Телефон", "Чат в приложении"]}
+        self.assertEqual(normalize_category_values(sql, values),
+                         sql.replace("'Чат в приложение'", "'Чат в приложении'"))
+
+    def test_unknown_or_ambiguous_value_is_not_rewritten(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Канал обращения" = 'Чат в приложение'"""
+        self.assertEqual(normalize_category_values(sql, {"Канал обращения": ["Телефон"]}), sql)
+        ambiguous = """SELECT COUNT(*) FROM t WHERE "Канал" = 'Сервису доставки'"""
+        values = {"Канал": ["Сервис доставки", "Сервиса доставки"]}
+        self.assertEqual(normalize_category_values(ambiguous, values), ambiguous)
+
+    def test_numeric_ids_not_stemmed_and_like_unchanged(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Период" = '2025'"""
+        values = {"Период": ["2026"]}
+        self.assertEqual(normalize_category_values(sql, values), sql)
+        like = """SELECT COUNT(*) FROM t WHERE "Канал" ILIKE 'Чат в приложение'"""
+        self.assertEqual(normalize_category_values(
+            like, {"Канал": ["Чат в приложении"]}), like)
+
+    def test_does_not_rewrite_literals_of_other_columns(self):
+        from backend.llm.semantics import normalize_category_values
+        sql = """SELECT COUNT(*) FROM t WHERE "Статус" = 'Чат в приложение'"""
+        values = {"Канал": ["Чат в приложении"], "Статус": ["Готово"]}
+        self.assertEqual(normalize_category_values(sql, values), sql)
+
+class GroupInSelectTests(unittest.TestCase):
+    """E2E 05.11: GROUP BY без колонки разбивки в SELECT."""
+
+    def test_group_column_required(self):
+        from backend.llm.semantics import Intent, check_sql
+        q = "Какая суммарная стоимость доставки по статусам отправлений?"
+        bad = 'SELECT SUM("Стоимость доставки, руб.") AS "Сумма" FROM t GROUP BY "Статус"'
+        self.assertIn("нет в SELECT", " ".join(check_sql(bad, q, Intent.parse(q), {}, strict=False)))
+        good = 'SELECT "Статус", SUM("Стоимость доставки, руб.") FROM t GROUP BY "Статус"'
+        self.assertEqual(check_sql(good, q, Intent.parse(q), {}), [])
+        month = ('SELECT date_trunc(\'month\', "Дата") AS "Месяц", COUNT(*) FROM t '
+                 'GROUP BY date_trunc(\'month\', "Дата")')
+        self.assertEqual(check_sql(month, "Сколько по месяцам?", Intent.parse("Сколько по месяцам?"), {}), [])
+
+    def test_month_alias_in_group_by_matches_visible_select_label(self):
+        from backend.llm.semantics import Intent, check_sql
+        question = "Сколько записей о продажах было в каждом месяце?"
+        sql = ('SELECT date_trunc(\'month\', "Дата операции (МСК)") AS "Месяц", '
+               'COUNT(*) AS "Количество записей" FROM t GROUP BY "Месяц" ORDER BY "Месяц"')
+        self.assertEqual(check_sql(sql, question, Intent.parse(question), {},
+                                   columns=["Дата операции (МСК)"]), [])
+
+    def test_missing_or_misleading_group_alias_still_rejected(self):
+        from backend.llm.semantics import Intent, check_sql
+        question = "Сколько записей о продажах было в каждом месяце?"
+        missing = ('SELECT COUNT(*) AS "Количество" FROM t GROUP BY "Месяц"')
+        wrong_alias = ('SELECT date_trunc(\'month\', "Дата операции (МСК)") AS "Год", '
+                       'COUNT(*) FROM t GROUP BY "Месяц"')
+        misleading = ('SELECT COUNT(*) AS "Месяц" FROM t GROUP BY "Месяц"')
+        for sql in [missing, wrong_alias, misleading]:
+            with self.subTest(sql=sql):
+                issues = check_sql(sql, question, Intent.parse(question), {})
+                self.assertTrue(any("нет в SELECT" in issue for issue in issues), issues)
+
+
+class ExtraConditionTests(unittest.TestCase):
+    """E2E 30.10: лишний IS NULL и подзапросы к вопросам «без карты»."""
+
+    def test_rejected_on_strict_attempts(self):
+        from backend.llm.semantics import Intent, check_sql
+        values = {"Уровень программы лояльности": ["Без карты лояльности", "Серебряный"]}
+        q = "Сколько строк продаж без карты?"
+        null_sql = ('SELECT COUNT(*) FROM t WHERE "Код покупателя" IS NULL AND '
+                    '"Уровень программы лояльности" = \'Без карты лояльности\'')
+        self.assertIn("IS NULL", " ".join(check_sql(null_sql, q, Intent.parse(q), values)))
+        sub = ('SELECT COUNT(DISTINCT "Код заказа") FROM t WHERE "Код покупателя" NOT IN '
+               '(SELECT "Код покупателя" FROM t WHERE "Уровень программы лояльности" = '
+               '\'Без карты лояльности\')')
+        self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values)))
+        self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values, strict=False)))
+        good = 'SELECT COUNT(*) FROM t WHERE "Уровень программы лояльности" = \'Без карты лояльности\''
+        self.assertEqual(check_sql(good, q, Intent.parse(q), values), [])
+        q2 = "Сколько обращений без даты закрытия?"
+        self.assertEqual(check_sql('SELECT COUNT(*) FROM t WHERE "Закрыто (МСК)" IS NULL', q2,
+                                   Intent.parse(q2), {}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

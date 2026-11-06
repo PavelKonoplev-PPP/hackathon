@@ -4,6 +4,7 @@ import AddToDashboard from './AddToDashboard.jsx'
 import SaveQueryButton from './SaveQueryButton.jsx'
 import StepsView, { formatMs } from './StepsView.jsx'
 import PickMenu from './PickMenu.jsx'
+import { forecastBreakdownReason } from '../lib/breakdown.js'
 import { detectSplitRequest } from '../lib/chartViews.js'
 import { useCategoryColumns } from '../lib/schemaCache.js'
 
@@ -22,6 +23,7 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
   const categoryColumns = useCategoryColumns(hasResultCheck(msg) ? msg.tableName : null)
   const used = new Set([msg.chart?.x_label, ...(msg.table?.columns || []), ...(msg.chart?.series || []).map((s) => s.name)].filter(Boolean))
   const splitColumns = msg.chart ? categoryColumns.filter((c) => !used.has(c)) : []
+  const breakdownReason = forecastBreakdownReason(msg)
 
   return (
     <div className={`msg ${isUser ? 'msg-user' : 'msg-bot'}`}>
@@ -94,7 +96,7 @@ export default function Message({ msg, question, askedText = '', datasourceId, t
               <PickMenu
                 label="Разбить по…"
                 heading="Разбить по признаку"
-                items={splitColumns.map((c) => ({ key: c, label: c }))}
+                items={splitColumns.map((c) => ({ key: c, label: c, reason: breakdownReason }))}
                 onPick={(o) => onSplitBy(msg.id, o.key)}
               />
             )}

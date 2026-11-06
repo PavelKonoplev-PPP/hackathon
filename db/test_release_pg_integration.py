@@ -1,0 +1,306 @@
+"""CSV and external datasource smoke on a dedicated ephemeral CI PostgreSQL.
+
+NEVER runs against a local developer database. The DB-name guard is mandatory.
+"""
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+import psycopg
+
+from db.csv_service import import_uploaded_csv, preview_csv
+READER_USER = "bi_ci_reader"
+READER_PASSWORD = "ci_ephemeral_reader_password"
+
+
+@unittest.skipUnless(os.getenv("CI_DATE_AUDIT_DSN"), "only dedicated PostgreSQL CI service")
+class ReleasePostgresSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.conn = psycopg.connect(os.environ["CI_DATE_AUDIT_DSN"], autocommit=True)
+        if cls.conn.info.dbname != "bi_ci_date_audit":
+            cls.conn.close()
+            raise RuntimeError("Refusing all fixture writes outside dedicated bi_ci_date_audit")
+        cls.conn.execute("CREATE SCHEMA IF NOT EXISTS raw")
+        cls.conn.execute("CREATE ROLE bi_ci_reader LOGIN PASSWORD 'ci_ephemeral_reader_password'")
+        cls.conn.execute("CREATE TABLE raw.demo_orders (id text, amount text)")
+        cls.conn.execute("INSERT INTO raw.demo_orders VALUES ('001', '1,25'), ('002', '2,50'), ('003', '3,75')")
+        cls.conn.execute("CREATE TABLE raw.demo_support (ticket text, status text)")
+        cls.conn.execute("INSERT INTO raw.demo_support VALUES ('T1', 'Open'), ('T2', 'Closed')")
+        cls.conn.execute("GRANT USAGE ON SCHEMA raw TO bi_ci_reader")
+        cls.conn.execute("GRANT SELECT ON ALL TABLES IN SCHEMA raw TO bi_ci_reader")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.conn.close()
+
+    def test_csv_preview_and_import_preserve_strings_and_reject_overwrite(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "bi_ci_csv_smoke.csv"
+            path.write_text(
+                "Код;Сумма;Сумма;Канал\n"
+                "00123;1,25;2,50;Чат\n"
+                "00001;0,00;;Телефон\n"
+                "00002;;4,00;Чат\n",
+                encoding="utf-8-sig",
+            )
+            preview = preview_csv(path)
+            self.assertEqual(preview["delimiter"], ";")
+            self.assertEqual(preview["columns"], ["Код", "Сумма", "Сумма__2", "Канал"])
+            self.assertEqual(preview["rows"][0], ["00123", "1,25", "2,50", "Чат"])
+
+            result = import_uploaded_csv(
+                self.conn, path, original_filename="bi_ci_csv_smoke.csv", replace=False,
+            )
+            self.assertEqual(result["row_count"], 3)
+            self.assertEqual(result["table_name"], "data_bi_ci_csv_smoke")
+            raw = self.conn.execute(
+                'SELECT "Код", "Сумма", "Сумма__2" '
+                'FROM raw.data_bi_ci_csv_smoke ORDER BY "Код"'
+            ).fetchall()
+            self.assertEqual(raw[0], ("00001", "0,00", ""))
+            self.assertEqual(raw[-1], ("00123", "1,25", "2,50"))
+
+            with self.assertRaisesRegex(RuntimeError, "уже существует"):
+                import_uploaded_csv(
+                    self.conn, path, original_filename="bi_ci_csv_smoke.csv", replace=False,
+                )
+            self.assertEqual(
+                self.conn.execute("SELECT COUNT(*) FROM raw.data_bi_ci_csv_smoke").fetchone()[0], 3
+            )
+
+            cp = Path(d) / "cp1251.csv"
+            cp.write_bytes("Код;Статус\n001;Готово\n".encode("cp1251"))
+            cp_preview = preview_csv(cp, encoding="cp1251")
+            self.assertEqual(cp_preview["rows"][0], ["001", "Готово"])
+
+    def test_anomaly_september_upper_tail_against_independent_pg16_reference(self):
+        """Regression #121: date first, then per-channel IQR; no lower-tail inflation."""
+        from backend.llm.recipes import anomaly_recipe
+        from backend.llm.sql_runner import PostgresRunner
+
+        # Guard in setUpClass ensures this entire fixture exists only in the
+        # disposable bi_ci_date_audit CI database, never in local raw.
+        self.conn.execute(
+            'CREATE TABLE raw.ci_anomaly_qa '
+            '("Дата операции (МСК)" text, "Канал продажи" text, "Сумма, руб." text)'
+        )
+        try:
+            rows = (
+                [("2025-09-01 12:00:00", "Интернет", "100")] * 20
+                + [("2025-09-25 12:00:00", "Интернет", "1000")]
+                + [("2025-08-01 12:00:00", "Интернет", "10000")] * 30
+                + [("2025-09-01 12:00:00", "Розница", "50")] * 8
+                + [("2025-09-25 12:00:00", "Розница", "500")]
+            )
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    'INSERT INTO raw.ci_anomaly_qa VALUES (%s, %s, %s)', rows
+                )
+
+            fixture = {"name": "ci_anomaly_qa", "columns": [
+                {"name": "Дата операции (МСК)", "inferred_type": "timestamp",
+                 "conversion": {"target_type": "timestamp", "policy": "safe_complete"}},
+                {"name": "Канал продажи", "inferred_type": "category"},
+                {"name": "Сумма, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_complete"}},
+            ]}
+            prompt = ("Найди аномально крупные суммы по каналам продаж "
+                      "за сентябрь 2025 года. Покажи количество выбросов и порог.")
+            recipe = anomaly_recipe(prompt, fixture)
+            self.assertIsNotNone(recipe)
+            runner = PostgresRunner(self.conn, schema="raw")
+            result = runner.run(fixture, recipe.sql)
+            by_channel = {r[0]: r for r in result.rows}
+            self.assertEqual(set(by_channel), {"Интернет", "Розница"})
+            online, retail = by_channel["Интернет"], by_channel["Розница"]
+
+            # Reference determined from 20 x 100, 1 x 1000 in September;
+            # 30 x 10000 in August would corrupt both thresholds if not filtered.
+            actual_september = self.conn.execute(
+                'SELECT COUNT(*) FROM raw.ci_anomaly_qa '
+                'WHERE "Канал продажи" = %s AND "Дата операции (МСК)" >= %s '
+                'AND "Дата операции (МСК)" < %s',
+                ("Интернет", "2025-09-01", "2025-10-01"),
+            ).fetchone()[0]
+            self.assertEqual(actual_september, 21)
+            self.assertEqual(online[1], actual_september)
+            self.assertEqual(online[4], 100)  # Q3=Q1=100 => upper bound=100
+            self.assertEqual(online[5], 1)    # exactly one *high* outlier
+            self.assertEqual(online[6], 1000)
+            self.assertEqual(retail[1], 9)
+            self.assertIsNone(retail[5])      # too few observations, no claim
+            answer = recipe.answer(result.columns, result.rows)
+            self.assertIn("1 из 21", answer)
+            self.assertIn("Розница", answer)
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_anomaly_qa")
+
+    def test_verified_lag_is_plus_three_days_on_known_postgres_series(self):
+        """#118: calendar-aligned +3 day signal, with a missing day, on real PG16."""
+        import datetime as dt
+        from backend.llm.lag_analysis import build_lag_plan
+        from backend.llm.sql_guard import validate_sql
+        from backend.llm.sql_runner import PostgresRunner
+
+        self.conn.execute(
+            'CREATE TABLE raw.ci_lag_qa '
+            '("Дата" text, "Клики" text, "Выручка, руб." text)'
+        )
+        try:
+            origin = dt.date(2025, 3, 1)
+            signals = [((i * 31 + i * i * 19 + 5) % 101) + 1 for i in range(30)]
+            values = []
+            for day in range(33):
+                if day == 10:  # calendar gap must not get row-position matched
+                    continue
+                clicks = str(signals[day]) if day < 30 else None
+                revenue = str(signals[day - 3] * 3 + 7) if 3 <= day < 33 else None
+                values.append((str(origin + dt.timedelta(days=day)), clicks, revenue))
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    'INSERT INTO raw.ci_lag_qa VALUES (%s, %s, %s)', values
+                )
+            fixture = {"name": "ci_lag_qa", "columns": [
+                {"name": "Дата", "inferred_type": "date",
+                 "conversion": {"target_type": "date", "policy": "safe_complete"}},
+                {"name": "Клики", "inferred_type": "integer",
+                 "conversion": {"target_type": "integer", "policy": "safe_with_nulls"}},
+                {"name": "Выручка, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_with_nulls"}},
+            ]}
+            plan = build_lag_plan(
+                "Проверь лаг между кликами и выручкой от -7 до +7 дней", fixture
+            )
+            self.assertIsNotNone(plan)
+            sql = validate_sql(plan.sql, [c["name"] for c in fixture["columns"]])
+            result = PostgresRunner(self.conn, schema="raw").run(fixture, sql)
+            self.assertTrue(result.rows)
+            winner = result.rows[0]
+            self.assertEqual(winner[0], 3)
+            self.assertEqual(winner[1], 28)
+            self.assertAlmostEqual(float(winner[2]), 1.0, places=4)
+            self.assertIn("на 3 дн.", plan.answer(result.columns, result.rows))
+            self.assertIn("пар наблюдений: 28", plan.answer(result.columns, result.rows))
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_lag_qa")
+
+    def test_delivery_multisegment_average_count_percent_real_pg16(self):
+        """#121: user question with two groups, two periods and two metrics."""
+        from backend.llm import compare, segment_compare
+        from backend.llm.sql_guard import validate_sql
+        from backend.llm.sql_runner import PostgresRunner
+
+        # Never create fixtures outside the dedicated CI PostgreSQL database.
+        self.conn.execute(
+            'CREATE TABLE raw.ci_compare_qa '
+            '("Доставлено (МСК)" text, "Способ доставки" text, '
+            '"Перевозчик" text, "Стоимость доставки, руб." text)'
+        )
+        try:
+            rows = [
+                ("2025-03-01 10:00:00", "Курьером", "А", "100"),
+                ("2025-03-15 10:00:00", "Курьером", "А", "200"),
+                ("2025-03-31 23:59:59", "Курьером", "А", None),
+                ("2025-04-01 00:00:00", "Курьером", "А", "150"),
+                ("2025-04-30 20:00:00", "Курьером", "А", "300"),
+                ("2025-02-28 12:00:00", "Курьером", "А", "99999"),
+                ("2025-05-01 00:00:00", "Курьером", "А", "99999"),
+                ("2025-03-20 10:00:00", "Самовывоз", "Б", "0"),
+                ("2025-04-20 10:00:00", "Самовывоз", "Б", "100"),
+            ]
+            with self.conn.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO raw.ci_compare_qa VALUES (%s, %s, %s, %s)", rows
+                )
+
+            fixture = {"name": "ci_compare_qa", "columns": [
+                {"name": "Доставлено (МСК)", "inferred_type": "timestamp",
+                 "conversion": {"target_type": "timestamp", "policy": "safe_with_nulls"}},
+                {"name": "Способ доставки", "inferred_type": "category"},
+                {"name": "Перевозчик", "inferred_type": "category"},
+                {"name": "Стоимость доставки, руб.", "inferred_type": "decimal",
+                 "conversion": {"target_type": "decimal", "policy": "safe_with_nulls"}},
+            ]}
+            question = (
+                "Сравни среднюю стоимость доставки по способу доставки и "
+                "перевозчику за март и апрель 2025 года. По каждой комбинации "
+                "покажи количество доставок, среднюю стоимость в каждом месяце "
+                "и изменение в процентах."
+            )
+            periods = compare.parse_periods(question)
+            plan = segment_compare.build(question, fixture, periods, "Доставлено (МСК)")
+            self.assertIsNotNone(plan)
+            sql = validate_sql(plan.sql, [c["name"] for c in fixture["columns"]])
+            result = PostgresRunner(self.conn, schema="raw").run(fixture, sql)
+            by_group = {(row[0], row[1]): row for row in result.rows}
+            self.assertEqual(set(by_group), {("Курьером", "А"), ("Самовывоз", "Б")})
+            courier, other = by_group[("Курьером", "А")], by_group[("Самовывоз", "Б")]
+
+            reference = self.conn.execute(
+                'SELECT COUNT(*), AVG("Стоимость доставки, руб."::numeric) '
+                'FROM raw.ci_compare_qa WHERE "Способ доставки" = %s '
+                'AND "Перевозчик" = %s '
+                'AND "Доставлено (МСК)" >= %s AND "Доставлено (МСК)" < %s',
+                ("Курьером", "А", "2025-03-01", "2025-04-01"),
+            ).fetchone()
+            self.assertEqual(reference[0], 3)
+            self.assertEqual(reference[1], 150)
+            self.assertEqual(courier[2], reference[0])
+            self.assertEqual(courier[3], reference[1])
+            self.assertEqual(courier[4], 2)
+            self.assertEqual(courier[5], 225)
+            self.assertEqual(courier[6], 50)
+            self.assertEqual(other[2], 1)
+            self.assertEqual(other[4], 1)
+            self.assertEqual(other[3], 0)
+            self.assertEqual(other[5], 100)
+            self.assertIsNone(other[6])  # zero baseline must not become 100%
+
+            text = plan.answer(result.columns, result.rows)
+            self.assertIn("доставок 4 и 3", text)
+            self.assertIn("50.00%", text)
+        finally:
+            self.conn.execute("DROP TABLE IF EXISTS raw.ci_compare_qa")
+
+    def test_external_postgres_discovery_and_readonly_enforcement(self):
+        from backend.app.services.datasources import READ_ONLY_OPTIONS, test_postgres_connection
+        from backend.llm.sql_runner import PostgresRunner
+
+        ok, _ms, tables, msg = test_postgres_connection(
+            host="127.0.0.1", port=5432, dbname="bi_ci_date_audit",
+            user=READER_USER, password=READER_PASSWORD, schema_name="raw",
+        )
+        self.assertTrue(ok, msg)
+        self.assertIn("demo_orders", tables)
+        self.assertIn("demo_support", tables)
+
+        with psycopg.connect(
+            host="127.0.0.1", port=5432, dbname="bi_ci_date_audit",
+            user=READER_USER, password=READER_PASSWORD,
+            autocommit=True, options=READ_ONLY_OPTIONS,
+        ) as conn:
+            self.assertEqual(
+                conn.execute("SHOW default_transaction_read_only").fetchone()[0], "on"
+            )
+            runner = PostgresRunner(conn, schema="raw")
+            orders = {"name": "demo_orders", "columns": [
+                {"name": "id", "inferred_type": "identifier"},
+                {"name": "amount", "inferred_type": "decimal"},
+            ]}
+            support = {"name": "demo_support", "columns": [
+                {"name": "ticket", "inferred_type": "identifier"},
+                {"name": "status", "inferred_type": "category"},
+            ]}
+            self.assertEqual(runner.run(orders, "SELECT COUNT(*) FROM t").rows[0][0], 3)
+            self.assertEqual(runner.run(support, "SELECT COUNT(*) FROM t").rows[0][0], 2)
+            self.assertEqual(runner.run(orders, "SELECT COUNT(*) FROM t").rows[0][0], 3)
+
+            with self.assertRaises(psycopg.errors.ReadOnlySqlTransaction):
+                conn.execute("UPDATE raw.demo_orders SET id = '999'")
+            self.assertEqual(runner.run(orders, "SELECT COUNT(*) FROM t").rows[0][0], 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

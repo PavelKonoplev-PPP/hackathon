@@ -28,7 +28,9 @@ try:
         detect_ambiguous_query,
         detect_out_of_scope,
     )
-    from backend.llm.catalog_summary import display_table_name, match_table_name  # type: ignore
+    from backend.llm.catalog_summary import (  # type: ignore
+        catalog_inventory_response, display_table_name, match_table_name,
+    )
     HAS_LLM_MODULE = True
 except ImportError:
     try:
@@ -40,7 +42,9 @@ except ImportError:
             detect_ambiguous_query,
             detect_out_of_scope,
         )
-        from llm.catalog_summary import display_table_name, match_table_name  # type: ignore
+        from llm.catalog_summary import (  # type: ignore
+            catalog_inventory_response, display_table_name, match_table_name,
+        )
         HAS_LLM_MODULE = True
     except ImportError:
         HAS_LLM_MODULE = False
@@ -185,6 +189,40 @@ def is_describe_intent(question: str) -> bool:
     if any(t in q for t in triggers):
         return True
     return any(p.search(question.strip()) for p in DESCRIBE_PATTERNS)
+
+
+def is_catalog_inventory_intent(question: str) -> bool:
+    """Source-wide table counts, not a question about one selected table.
+
+    In particular, "Сколько таблиц и строк всего в текущем источнике?"
+    must not be routed to per-table SQL disambiguation.
+    """
+    q = question.lower().replace("ё", "е").strip()
+    tables = r"таблиц(?:ы|ам|ах|ами)?"
+    if re.search(rf"\bсколько\s+(?:всего\s+)?{tables}\b", q):
+        return True
+    if re.search(rf"\b(?:число|количество)\s+(?:всех\s+)?{tables}\b", q):
+        return True
+    if re.search(rf"\b{tables}\b", q) and re.search(r"\b(?:строк|записей)\b", q):
+        return bool(re.search(
+            r"\b(?:перечисли|всех|все|всего|каждой|каждую|каждом|источнике|базе)\b",
+            q,
+        ))
+    return False
+
+
+def _open_runner(datasource_id: str | None):
+    """(runner, conn) для чтения: внешний источник или основная база под bi_reader."""
+    ds = (datasource_id or "raw").strip().lower()
+    if ds != "raw":
+        from .datasources import get_all_datasources, get_datasource_connection
+
+        for item in get_all_datasources():
+            if item.id != "raw" and item.id.lower() == ds:
+                conn, schema, _ = get_datasource_connection(item.id)
+                return PostgresRunner(conn, schema=schema), conn
+    conn = get_reader_connection()
+    return PostgresRunner(conn), conn
 
 
 def filter_catalog_for_scope(
@@ -470,6 +508,20 @@ def process_chat_message(
                     "clarification": None,
                 }
 
+        # Source-wide metadata inventory precedes per-table disambiguation.
+        # Use the *filtered* active catalog: external sources and table scopes
+        # must never leak data about the raw datasource.
+        if is_catalog_inventory_intent(message):
+            if recorder:
+                recorder.step("catalog_inventory", "Подсчёт таблиц и строк по каталогу источника")
+            res = catalog_inventory_response(catalog)
+            if recorder:
+                recorder.finish("completed")
+                res["status"] = "completed"
+                res["steps"] = [s.model_dump() for s in recorder.steps]
+                res["execution_time_ms"] = recorder.total_duration_ms
+            return res
+
         # 2. Неподдерживаемые метрики и сущности, отсутствующие в датасете. Проверяем после
         # выбора источника: термин, подтверждённый в бизнес-словаре ЭТОГО источника
         # («CSAT» → «Оценка клиента», BI-37), не отказ; остальное — отказ как раньше.
@@ -502,11 +554,18 @@ def process_chat_message(
         if is_describe_intent(message):
             if recorder:
                 recorder.step("describe_data", "Формирование описания структуры данных")
+            describe_runner, describe_conn = runner, None
+            if describe_runner is None:  # фактические периоды данных (#119); без БД — без них
+                try:
+                    describe_runner, describe_conn = _open_runner(datasource_id)
+                except Exception as exc:  # описание по каталогу всё равно покажем
+                    logger.warning("Период данных не рассчитан: %s", exc)
             try:
                 res = describe_data(
                     catalog,
                     relationships=relationships,
                     table_name=table_name,
+                    runner=describe_runner,
                 )
                 if recorder:
                     recorder.finish("completed")
@@ -527,6 +586,12 @@ def process_chat_message(
                 if recorder:
                     recorder.finish("failed")
                 raise AgentServiceError(f"Ошибка при описании данных: {exc}") from exc
+            finally:
+                if describe_conn is not None:
+                    try:
+                        describe_conn.close()
+                    except Exception:
+                        pass
 
         # Analytical SQL query
         conn = None
