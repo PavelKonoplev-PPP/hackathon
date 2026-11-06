@@ -340,29 +340,37 @@ def _check_missing_filter(sql: str, question: str, values: dict[str, list[str]],
 
 
 def _check_group_in_select(sql: str) -> list[str]:
-    """«SELECT SUM(x) FROM t GROUP BY "Статус"» — суммы без подписей групп: непонятно, где
-    какая. Колонка разбивки обязана быть в SELECT (E2E 05.11, ho_delivery_cost_by_status)."""
+    """Ensure group labels appear in SELECT, including computed aliases.
+
+    PostgreSQL supports GROUP BY "Месяц" when SELECT defines
+    date_trunc('month', date_column) AS "Месяц". Aggregate aliases alone
+    are not group labels.
+    """
     from .kpis import select_items, _split_top
+
     m = re.search(r"\bgroup\s+by\b(.*?)(\border\s+by\b|\bhaving\b|\blimit\b|$)", sql,
                   re.IGNORECASE | re.DOTALL)
     if not m or re.match(r"\s*with\b", sql, re.IGNORECASE):
         return []
+
     selected = " ".join(select_items(sql))
-    # GROUP BY may refer to a SELECT expression by its output alias:
-    # SELECT date_trunc('month', "Дата") AS "Месяц" ... GROUP BY "Месяц".
-    # select_items() intentionally removes aliases, so check them separately.
-    # An aggregate named "Месяц" is not a substitute for showing the group label.
     select_clause = re.search(r"\bselect\b(.*?)\bfrom\s+t\b", sql,
                               re.IGNORECASE | re.DOTALL)
-    visible_aliases = set()
+    visible_aliases: set[str] = set()
     if select_clause:
         for item in _split_top(select_clause.group(1)):
-            match = re.search(r'\bas\s+"([^"]+)"\s*
-    if missing:
-        return [f"Колонка разбивки \"{missing[0]}\" есть в GROUP BY, но её нет в SELECT — "
-                f"добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
-    return []
+            alias = re.search(r'\bas\s+"([^"]+)"\s*$', item, re.IGNORECASE)
+            if alias and not re.search(
+                    r"\b(?:count|sum|avg|min|max|array_agg|percentile_cont)\s*\(",
+                    item, re.IGNORECASE):
+                visible_aliases.add(alias.group(1))
 
+    missing = [column for column in re.findall(r'"([^"]+)"', m.group(1))
+               if f'"{column}"' not in selected and column not in visible_aliases]
+    if missing:
+        return [f'Колонка разбивки "{missing[0]}" есть в GROUP BY, но её нет в SELECT — '
+                "добавь её первой колонкой SELECT, иначе непонятно, к какой группе число."]
+    return []
 
 def _check_average(sql: str, question: str, numeric_columns: list[str] | None,
                    aliases: dict[str, list[str]] | None) -> list[str]:
