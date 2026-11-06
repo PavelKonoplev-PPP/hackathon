@@ -278,7 +278,20 @@ def unit_options(question: str, intent: Intent, table: dict) -> list[tuple[str, 
     ids = [c for c in table.get("columns") or []
            if c.get("inferred_type") == "identifier" and not c.get("warning") and c.get("sample_rows")]
     unique = [c for c in ids if (c.get("sample_distinct") or 0) >= c["sample_rows"]]
-    if not unique or any(same_word(noun, w) for c in unique for w in words(c["name"])):
+    # The entity may have an adjective: "Сколько фоновых заданий".
+    # counted_noun() returns "фоновых", but "заданий" matches "Код задания"
+    # and means one row per task. Ignore words after prepositions introducing
+    # a filter / grouping so an unrelated identifier cannot remove clarification.
+    subject = re.search(r"\bсколько\b([^?!.;,]*)", question, re.IGNORECASE)
+    subject_text = (re.split(
+        r"\b(?:в|во|на|по|через|за|для|у|от|из|с|со|при|без)\b",
+        subject.group(1), maxsplit=1, flags=re.IGNORECASE,
+    )[0] if subject else noun)
+    subject_words = words(subject_text) or {noun}
+    if not unique or any(
+        same_word(token, w)
+        for c in unique for w in words(c["name"]) for token in subject_words
+    ):
         return []
     groups = [c for c in ids if 0.5 * c["sample_rows"] <= (c.get("sample_distinct") or 0) < c["sample_rows"]]
     groups = sorted(groups, key=lambda c: -(c.get("sample_distinct") or 0))[:2]
