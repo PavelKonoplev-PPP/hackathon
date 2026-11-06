@@ -31,6 +31,7 @@ from . import advanced_analytics as adv
 from . import compare as cmp
 from . import glossary as gl
 from . import kpis as kp
+from . import recipes as rc
 from . import whatif as wi
 from .catalog_summary import TYPE_LABELS, display_table_name, format_int, match_table_name
 from .semantics import (DEFAULT_DATASET_SUGGESTIONS, MONEY, MUTATION_PATTERN, Intent,
@@ -70,7 +71,9 @@ SQL_PROMPT = """Ты пишешь SQL для PostgreSQL 16. Все данные 
   SUM("колонка") для штук и денег. Никогда не отвечай списком строк.
 - «Разных», «уникальных» X — COUNT(DISTINCT "X").
 - WHERE добавляй только для условий, которые есть в вопросе. Значения категорий
-  бери только из списка, написание — точно как в списке.
+  бери только из списка, написание — точно как в списке. «Без карты», «через чат» —
+  это фильтр по значению: WHERE "колонка" = 'значение'. Без подзапросов (SELECT внутри
+  запроса) и без IS NULL, если о пустых значениях не спрашивали.
 - LIMIT только если просят «топ», «самые», «первые N». Иначе выведи все группы.
 - По месяцам: GROUP BY date_trunc('month', "дата") и ORDER BY по этой дате;
   по годам — date_trunc('year', ...).
@@ -974,6 +977,23 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if formula and MONEY.search(full_question):
         extra_hint += f"\nВыручка в этой таблице: {formula}.\n"
 
+    # Доля значения от общего (#96): подсказываем точную формулу — одно число без группировки
+    if SHARE.search(full_question) and not intent.wants_groups:
+        share_values = (values_by_table or {}).get(table["name"])
+        if share_values is None:
+            try:
+                share_values = runner.category_values(table) or {}
+            except Exception:
+                share_values = {}
+        ignore_words = words(display_table_name(table["name"]))
+        named = [(col, v) for col, vs in share_values.items() for v in vs
+                 if mentions(full_question, v, ignore_words)]
+        if named:
+            col, v = named[0]
+            extra_hint += (f"\nЭто доля «{v}» от общего числа — ОДНО число, без GROUP BY: "
+                           f"SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE \"{col}\" = '{v}') / "
+                           f"NULLIF(COUNT(*), 0), 2) AS \"Доля, %\" FROM t\n")
+
     # Утверждённый бизнес-KPI (#57): формула из data/kpi-definitions.json, а не своя.
     # В сравнении периодов не используем: FILTER к составной формуле так не приклеить.
     kpi = None if periods else kp.for_question(full_question, table, catalog.get("schema"))
@@ -987,6 +1007,28 @@ def _answer_question(question: str, catalog: dict, runner, client=None,
     if values is None:
         values = runner.category_values(table)
     column_names = [c["name"] for c in table.get("columns") or []]
+
+    # 5a. Готовый расчёт по шаблону (#112–#114): перцентиль, состояние на дату, цепочки.
+    # SQL строит код из колонок таблицы — модель тут не нужна и не может ошибиться.
+    recipe = None if periods and len(periods) > 1 else rc.build(full_question, table, values)
+    if recipe:
+        say(f"Готовый расчёт: {recipe.description}")
+        try:
+            sql = validate_sql(recipe.sql, column_names)
+            result = runner.run(table, sql)
+        except Exception as exc:  # не вышло — дальше обычным путём, через модель
+            say(f"Шаблон не сработал ({str(exc).splitlines()[0]}) — пишу SQL обычным путём")
+            trace["errors"].append(f"recipe: {exc}")
+        else:
+            trace.update(sql=sql, columns=result.columns, rows=result.rows, recipe=recipe.kind,
+                         attempts=0)
+            state["last"] = {"question": full_question, "table": table["name"], "sql": sql}
+            response = _result_response(result, sql, table, None, full_question)
+            response.pop("_note", None)
+            response["answer"] = recipe.answer(result.columns, result.rows)
+            response["table_name"] = table["name"]
+            return response
+
     numeric_columns = [c["name"] for c in table.get("columns") or []
                        if column_kind(c) in ("integer", "decimal")]
     table_words = words(display_table_name(table["name"]))

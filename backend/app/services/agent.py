@@ -187,6 +187,20 @@ def is_describe_intent(question: str) -> bool:
     return any(p.search(question.strip()) for p in DESCRIBE_PATTERNS)
 
 
+def _open_runner(datasource_id: str | None):
+    """(runner, conn) для чтения: внешний источник или основная база под bi_reader."""
+    ds = (datasource_id or "raw").strip().lower()
+    if ds != "raw":
+        from .datasources import get_all_datasources, get_datasource_connection
+
+        for item in get_all_datasources():
+            if item.id != "raw" and item.id.lower() == ds:
+                conn, schema, _ = get_datasource_connection(item.id)
+                return PostgresRunner(conn, schema=schema), conn
+    conn = get_reader_connection()
+    return PostgresRunner(conn), conn
+
+
 def filter_catalog_for_scope(
     catalog: dict | None,
     relationships: dict | None = None,
@@ -502,11 +516,18 @@ def process_chat_message(
         if is_describe_intent(message):
             if recorder:
                 recorder.step("describe_data", "Формирование описания структуры данных")
+            describe_runner, describe_conn = runner, None
+            if describe_runner is None:  # фактические периоды данных (#119); без БД — без них
+                try:
+                    describe_runner, describe_conn = _open_runner(datasource_id)
+                except Exception as exc:  # описание по каталогу всё равно покажем
+                    logger.warning("Период данных не рассчитан: %s", exc)
             try:
                 res = describe_data(
                     catalog,
                     relationships=relationships,
                     table_name=table_name,
+                    runner=describe_runner,
                 )
                 if recorder:
                     recorder.finish("completed")
@@ -527,6 +548,12 @@ def process_chat_message(
                 if recorder:
                     recorder.finish("failed")
                 raise AgentServiceError(f"Ошибка при описании данных: {exc}") from exc
+            finally:
+                if describe_conn is not None:
+                    try:
+                        describe_conn.close()
+                    except Exception:
+                        pass
 
         # Analytical SQL query
         conn = None

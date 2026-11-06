@@ -291,7 +291,9 @@ def compare_summary(columns: list[str], rows: list[tuple], pair: tuple[int, int]
     if len(rows) == 1 or not labels:
         r = rows[0]
         return f"{second}: {fmt(r[b])}, {first}: {fmt(r[a])} — {change(r)}."
-    name = labels[0]
+
+    def name_of(r):  # сегмент по нескольким признакам: «Курьером / Почтовая доставка» (#121)
+        return " / ".join(str(fmt(r[i])) for i in labels)
     valid = [r for r in rows if r[-2] is not None]
     if not valid:
         return "Для сравнения не хватает данных за один из периодов."
@@ -303,20 +305,25 @@ def compare_summary(columns: list[str], rows: list[tuple], pair: tuple[int, int]
     total_pct = (total_delta / abs(total_a) * 100 if total_a else None) if not is_pct else None
     total = change((None,) * 0 + (total_delta, total_pct))
     text = (f"{second} к {first} в целом — {total}. "
-            f"Сильнее всего выросло «{fmt(up[name])}» ({change(up)})")
+            f"Сильнее всего выросло «{name_of(up)}» ({change(up)})")
     if down is not up:
-        text += f", слабее всего — «{fmt(down[name])}» ({change(down)})"
+        text += f", слабее всего — «{name_of(down)}» ({change(down)})"
+    missing = len(rows) - len(valid)
+    if missing:
+        text += (f". Для {missing} сегм. нет данных за один из периодов — они в таблице "
+                 "с прочерком и в сравнении не участвуют")
     return text + "."
 
 
 def compare_chart(columns: list[str], rows: list[tuple], pair: tuple[int, int], fmt) -> dict:
     a, b = pair
     labels = [i for i in range(len(columns) - 2) if i not in pair and _num(rows[0][i]) is None]
-    categories = [fmt(r[labels[0]]) for r in rows] if labels else ["Итого"]
+    categories = ([" / ".join(str(fmt(r[i])) for i in labels) for r in rows] if labels
+                  else ["Итого"])
     return {
         "type": "bar",
         "title": f"{columns[b]} и {columns[a]}",
-        "x_label": columns[labels[0]] if labels else "",
+        "x_label": " / ".join(columns[i] for i in labels) if labels else "",
         "y_label": "",
         "categories": categories,
         "series": [{"name": columns[i], "data": [_num(r[i]) for r in rows]} for i in (a, b)],

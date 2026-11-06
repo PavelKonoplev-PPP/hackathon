@@ -472,5 +472,42 @@ class ShareTests(unittest.TestCase):
         self.assertEqual(self.check(q, sql), "")
 
 
+class GroupInSelectTests(unittest.TestCase):
+    """E2E 05.11: GROUP BY без колонки разбивки в SELECT."""
+
+    def test_group_column_required(self):
+        from backend.llm.semantics import Intent, check_sql
+        q = "Какая суммарная стоимость доставки по статусам отправлений?"
+        bad = 'SELECT SUM("Стоимость доставки, руб.") AS "Сумма" FROM t GROUP BY "Статус"'
+        self.assertIn("нет в SELECT", " ".join(check_sql(bad, q, Intent.parse(q), {}, strict=False)))
+        good = 'SELECT "Статус", SUM("Стоимость доставки, руб.") FROM t GROUP BY "Статус"'
+        self.assertEqual(check_sql(good, q, Intent.parse(q), {}), [])
+        month = ('SELECT date_trunc(\'month\', "Дата") AS "Месяц", COUNT(*) FROM t '
+                 'GROUP BY date_trunc(\'month\', "Дата")')
+        self.assertEqual(check_sql(month, "Сколько по месяцам?", Intent.parse("Сколько по месяцам?"), {}), [])
+
+
+class ExtraConditionTests(unittest.TestCase):
+    """E2E 30.10: лишний IS NULL и подзапросы к вопросам «без карты»."""
+
+    def test_rejected_on_strict_attempts(self):
+        from backend.llm.semantics import Intent, check_sql
+        values = {"Уровень программы лояльности": ["Без карты лояльности", "Серебряный"]}
+        q = "Сколько строк продаж без карты?"
+        null_sql = ('SELECT COUNT(*) FROM t WHERE "Код покупателя" IS NULL AND '
+                    '"Уровень программы лояльности" = \'Без карты лояльности\'')
+        self.assertIn("IS NULL", " ".join(check_sql(null_sql, q, Intent.parse(q), values)))
+        sub = ('SELECT COUNT(DISTINCT "Код заказа") FROM t WHERE "Код покупателя" NOT IN '
+               '(SELECT "Код покупателя" FROM t WHERE "Уровень программы лояльности" = '
+               '\'Без карты лояльности\')')
+        self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values)))
+        self.assertIn("подзапросы", " ".join(check_sql(sub, q, Intent.parse(q), values, strict=False)))
+        good = 'SELECT COUNT(*) FROM t WHERE "Уровень программы лояльности" = \'Без карты лояльности\''
+        self.assertEqual(check_sql(good, q, Intent.parse(q), values), [])
+        q2 = "Сколько обращений без даты закрытия?"
+        self.assertEqual(check_sql('SELECT COUNT(*) FROM t WHERE "Закрыто (МСК)" IS NULL', q2,
+                                   Intent.parse(q2), {}), [])
+
+
 if __name__ == "__main__":
     unittest.main()
