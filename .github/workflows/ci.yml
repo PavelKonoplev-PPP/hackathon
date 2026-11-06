@@ -90,9 +90,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install PostgreSQL client dependencies
-        run: python -m pip install -r db/requirements.txt
+      - name: Install backend and PostgreSQL dependencies
+        run: python -m pip install -r db/requirements.txt -r backend/requirements.txt
       - name: Audit actual PG16 date boundaries in an ephemeral CI DB only
         env:
           CI_DATE_AUDIT_DSN: postgresql://bi_ci_tester:ci_ephemeral_password_only@127.0.0.1:5432/bi_ci_date_audit
         run: python -m unittest db.test_date_ranges_pg_integration -v
+      - name: Smoke CSV and external PostgreSQL read-only on the same isolated CI DB
+        env:
+          CI_DATE_AUDIT_DSN: postgresql://bi_ci_tester:ci_ephemeral_password_only@127.0.0.1:5432/bi_ci_date_audit
+        run: python -m unittest db.test_release_pg_integration -v
