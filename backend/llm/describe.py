@@ -127,9 +127,12 @@ def period_section(catalog: dict, runner=None) -> str:
     for table in catalog.get("tables") or []:
         name = display_table_name(table["name"])
         columns = table.get("columns") or []
-        dates = [c for c in columns if column_kind(c) in ("date", "timestamp")]
+        dates = [c for c in columns if column_kind(c) in ("date", "timestamp")
+                 or ((c.get("conversion") or {}).get("date_range") or {}).get("scope")
+                 == "full_column_valid_values"]
         unsure = [c["name"] for c in columns
-                  if c.get("inferred_type") in ("date", "timestamp") and column_kind(c) is None]
+                  if c.get("inferred_type") in ("date", "timestamp")
+                  and column_kind(c) is None and c not in dates]
         if not dates:
             note = "нет поля даты — период определить нельзя"
             if unsure:
@@ -149,8 +152,12 @@ def period_section(catalog: dict, runner=None) -> str:
                     low, high = runner.date_range(table, col["name"])
                 except Exception:
                     low = high = None
+            audited = (col.get("conversion") or {}).get("date_range") or {}
+            if (low is None or high is None) and audited.get("scope") == "full_column_valid_values":
+                low, high = audited.get("min"), audited.get("max")
             if low is None and high is None:
-                span = "статистика не рассчитана"
+                span = ("корректных дат нет" if audited.get("scope")
+                        == "full_column_valid_values" else "статистика не рассчитана")
             else:
                 span = f"с {_fmt_date(low)} по {_fmt_date(high)}"
                 if (col.get("conversion") or {}).get("policy") == "safe_complete":
@@ -267,6 +274,8 @@ def main() -> int:
         print(summarize_catalog(catalog, relationships))
         print()
         print(quality_section(catalog))
+        print()
+        print(period_section(catalog))
         return 0
 
     result = describe_data(catalog, relationships,
