@@ -186,7 +186,9 @@ class PeriodSectionTests(unittest.TestCase):
         self.assertIn("«Закрыто» с 02.10.2024 по 01.10.2026 (заполнено 85 из 100)", text)
         self.assertIn("«Справочник»: нет поля даты — период определить нельзя", text)
         self.assertIn("«Сырой»: поле даты неоднозначно", text)
-        self.assertIn("Общий интервал источника: с 01.10.2024 по 30.09.2026", text)
+        self.assertIn("Общий диапазон значений полей даты: с 01.10.2024 по 30.09.2026", text)
+        self.assertIn("плановые сроки и будущие дедлайны", text)
+        self.assertIn("это не период фактически совершённых операций", text)
 
     def test_without_runner_no_invented_dates(self):
         from backend.llm.describe import period_section
