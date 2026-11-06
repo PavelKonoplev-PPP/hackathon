@@ -41,6 +41,10 @@ jobs:
           python-version: "3.12"
       - name: Установить зависимости загрузчика
         run: python -m pip install -r db/requirements.txt
+      - name: Execute segment and outlier SQL against temporary PostgreSQL 16
+        env:
+          PG_SQL_SMOKE_DSN: postgresql://postgres:smoke@localhost:5432/bi_smoke
+        run: python -m unittest discover -s db -p 'test_pg_segment_quality.py' -v
       - name: Проверить синтаксис и имена таблиц
         run: |
           python -m compileall -q db
