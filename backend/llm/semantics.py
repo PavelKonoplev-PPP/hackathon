@@ -399,7 +399,7 @@ def _check_extra_conditions(sql: str, question: str,
             if any(re.search(condition, item, re.IGNORECASE) for item in nested):
                 problems.append(
                     f'Для условия «{value}» используй WHERE "{col}" = {literal} '
-                    "в основном запросе, без NOT IN, инвертирующего отбор.")
+                    "в основном запросе; подзапросы NOT IN здесь инвертируют отбор.")
     if not strict or re.search(
             r"\b(?:null|пуст\w*|пропущ\w*|отсутств\w*|незаполн\w*|не\s+указ\w*)\b",
             question, re.IGNORECASE):
